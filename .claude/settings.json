@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.nta.go.jp)"
+    ],
+    "ask": [
+      "Bash",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Edit(./.claude/**)",
+      "Edit(~/.claude/settings*.json)",
+      "Edit(~/.claude/hooks/**)"
+    ],
+    "deny": [
+      "Read(**/.env*)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(./worker/settings.json)",
+      "Read(./worker/mcp/*.json)",
+      "Bash(rm)",
+      "Bash(rm *)",
+      "Bash(/bin/rm *)",
+      "Bash(/usr/bin/rm *)",
+      "Bash(sudo rm *)",
+      "Bash(rmdir *)",
+      "Bash(unlink *)",
+      "Bash(shred *)",
+      "Bash(xargs rm*)",
+      "Bash(find * -delete*)",
+      "Bash(git clean *)"
+    ],
+    "disableBypassPermissionsMode": "disable"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/audit-log.cjs"]
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/audit-log.cjs"]
+          }
+        ]
+      }
+    ]
+  }
+}
