@@ -1,0 +1,2 @@
+# hook スクリプトは Windows で編集しても LF のまま保つ
+*.sh text eol=lf
