@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "mfc_ca_apikey": {
+      "type": "http",
+      "url": "https://beta.mcp.developers.biz.moneyforward.com/mcp/ca/v3",
+      "headers": {
+        "Mf-API-Key": "${MF_API_KEY}"
+      }
+    },
+    "mfc_admin_apikey": {
+      "type": "http",
+      "url": "https://beta.mcp.developers.biz.moneyforward.com/mcp/admin/v2",
+      "headers": {
+        "Mf-API-Key": "${MF_API_KEY}"
+      }
+    }
+  }
+}
