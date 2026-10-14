@@ -7,12 +7,18 @@
  *   WORKER_TOKEN    … ワーカーとの合言葉(長いランダム文字列)
  *   INBOX_FOLDER_ID … 受け取った資料を保存するDriveフォルダのID
  *   APPROVERS       … 承認できる人のメール(カンマ区切り。空なら誰でも)
+ *   FOLDER_ROOT_ID  … (任意)関与先の共有フォルダをまとめた親フォルダのID。listFolders で一覧を作るときに使う
  */
 
 const SH_CONFIG = '設定';
 const SH_JOBS = 'ジョブ';
 const SH_LOG = 'MF操作ログ';
 const SH_SEEN = '処理済みファイル';
+const SH_ARCHIVE = 'ジョブ履歴';
+const SH_FOLDERS = 'フォルダ一覧';
+const ARCHIVE_DAYS = 30;       // 完了・却下から何日たったジョブを履歴シートに移すか
+const ARCHIVE_ERROR_DAYS = 90; // エラーは確認の時間を長めに取る
+const WATCH_BUDGET_MS = 4.5 * 60 * 1000; // GASの6分制限の手前で区切り、続きは1分後に再開
 
 const CONFIG_HEADERS = ['space', '事業者名', 'office_code', 'config', 'webhook', 'folder_id', '有効'];
 const JOB_HEADERS = ['id', 'created', 'source', 'space', 'office_code', 'config', 'status', 'requested_by',
@@ -75,7 +81,7 @@ function appendNote_(job, s) { return [job.note, s].filter(String).join(' / '); 
 /** 初回だけ実行: シートを用意する */
 function setup() {
   const ss = ss_();
-  [[SH_CONFIG, CONFIG_HEADERS], [SH_JOBS, JOB_HEADERS], [SH_LOG, LOG_HEADERS], [SH_SEEN, SEEN_HEADERS]]
+  [[SH_CONFIG, CONFIG_HEADERS], [SH_JOBS, JOB_HEADERS], [SH_LOG, LOG_HEADERS], [SH_SEEN, SEEN_HEADERS], [SH_ARCHIVE, JOB_HEADERS]]
     .forEach(([name, headers]) => {
       let sh = ss.getSheetByName(name);
       if (!sh) sh = ss.insertSheet(name);
@@ -113,6 +119,11 @@ function createJob_(o) {
 }
 
 function getJob_(id) { return readTable_(SH_JOBS).find(j => j.id === id) || null; }
+function archived_(id) {
+  const sh = sheet_(SH_ARCHIVE);
+  return !!sh && sh.getLastRow() > 1 && sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues().some(r => r[0] === id);
+}
+function notFound_(id) { return archived_(id) ? id + ' は終わってから日数がたったため「ジョブ履歴」シートに移しています(操作はできません)。' : id + ' が見つかりません。'; }
 
 function updateJob_(job, patch) {
   const sh = sheet_(SH_JOBS);
@@ -199,7 +210,7 @@ function decide_(word, id, user, cfg) {
   if (approvers.length && approvers.indexOf(user) < 0) return '承認・却下の権限がありません。';
 
   const job = getJob_(id);
-  if (!job) return id + ' が見つかりません。';
+  if (!job) return notFound_(id);
   if (String(job.space) !== String(cfg.space)) return id + ' はこのスペースのジョブではありません。';
   const ok = job.status === 'proposed' || (word === '却下' && job.status === 'waiting');
   if (!ok) return id + ' は「' + (STATUS_JA[job.status] || job.status) + '」のため' + word + 'できません。';
@@ -219,7 +230,7 @@ function revise_(id, instruction, user, cfg) {
   lock.waitLock(20000);
   try {
     const job = getJob_(id);
-    if (!job) return id + ' が見つかりません。';
+    if (!job) return notFound_(id);
     if (String(job.space) !== String(cfg.space)) return id + ' はこのスペースのジョブではありません。';
     if (job.source === 'audit' || job.source === 'rule') return id + ' は仕訳のジョブではありません。';
     const notRegistered = job.status === 'proposed' || job.status === 'waiting' || (job.status === 'done' && !job.result) || (job.status === 'error' && !job.result) || (job.status === 'rejected' && !job.result);
@@ -432,40 +443,93 @@ function result_(b) {
 
 /* ===== 共有フォルダ監視 ===== */
 
-/** 監視を始める前に1回だけ: いま入っているファイルを処理済み扱いにする */
+/** 監視を始める前・フォルダを追加したときに実行: いま入っているファイルを処理済み扱いにする(何度実行してもよい) */
 function baselineFolders() {
   const seenSh = sheet_(SH_SEEN);
-  const seen = new Set(readTable_(SH_SEEN).map(r => String(r.file_id)));
-  configs_().filter(c => c.folder_id).forEach(cfg => {
-    const it = DriveApp.getFolderById(cfg.folder_id).getFiles();
-    while (it.hasNext()) {
-      const f = it.next();
-      if (seen.has(f.getId())) continue;
-      seenSh.appendRow([f.getId(), safe_(f.getName()), cfg.folder_id, '(初期登録)', new Date()]);
-      seen.add(f.getId());
-    }
+  const seen = seenIds_();
+  const rows = [];
+  configs_().filter(c => String(c.folder_id).trim()).forEach(cfg => {
+    try {
+      const it = DriveApp.getFolderById(String(cfg.folder_id).trim()).getFiles();
+      while (it.hasNext()) {
+        const f = it.next();
+        if (seen.has(f.getId())) continue;
+        rows.push([f.getId(), safe_(f.getName()), cfg.folder_id, '(初期登録)', new Date()]);
+        seen.add(f.getId());
+      }
+    } catch (e) { console.error(cfg.config + ': ' + e.message); }
   });
+  // 1行ずつ書くと遅いので、まとめて書く
+  if (rows.length) seenSh.getRange(seenSh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+  console.log('処理済みとして登録: ' + rows.length + '件');
 }
 
-/** 時間トリガーで実行: 新しいファイルを「仕訳待ち」のジョブにして、スペースで指示を待つ(フォルダ直下のみ) */
-function watchFolders() {
-  configs_().filter(c => c.folder_id).forEach(cfg => {
+/** 時間トリガーで実行: 新しいファイルを「仕訳待ち」のジョブにして、スペースで指示を待つ(フォルダ直下のみ)
+ *  フォルダが多くても6分制限で止まらないよう、時間切れの手前で区切り、続きを1分後に再開する */
+function watchFolders() { watchFoldersFrom_(0); }
+function watchFoldersContinue() {
+  const props = PropertiesService.getScriptProperties();
+  const from = Number(props.getProperty('WATCH_CURSOR') || '0');
+  watchFoldersFrom_(from);
+}
+
+function watchFoldersFrom_(from) {
+  const started = Date.now();
+  const props = PropertiesService.getScriptProperties();
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'watchFoldersContinue')
+    .forEach(t => ScriptApp.deleteTrigger(t));
+
+  const cfgs = configs_().filter(c => String(c.folder_id).trim());
+  const dup = duplicateFolders_(cfgs);
+  for (let i = from; i < cfgs.length; i++) {
+    if (Date.now() - started > WATCH_BUDGET_MS) {
+      props.setProperty('WATCH_CURSOR', String(i));
+      ScriptApp.newTrigger('watchFoldersContinue').timeBased().after(60 * 1000).create();
+      console.log('時間切れのため ' + i + '/' + cfgs.length + ' で区切り、1分後に再開します');
+      return;
+    }
+    const cfg = cfgs[i];
+    if (dup[String(cfg.folder_id).trim()]) {
+      postToSpace_(cfg, '⚠ 共有フォルダ(' + cfg.folder_id + ')が設定シートの複数の事業者に登録されているため、確認を止めています。' +
+        '事業者の取り違えを防ぐため、設定シートの folder_id を直してください: ' + dup[String(cfg.folder_id).trim()].join(', '));
+      continue;
+    }
     try { scanFolder_(cfg, 10); } catch (e) { console.error(cfg.config + ': ' + e.message); }
-  });
+  }
+  props.deleteProperty('WATCH_CURSOR');
+}
+
+/** 同じフォルダIDが複数の事業者に登録されていないか(取り違え防止) */
+function duplicateFolders_(cfgs) {
+  const by = {};
+  cfgs.forEach(c => { const id = String(c.folder_id).trim(); (by[id] = by[id] || []).push(c.config); });
+  const dup = {};
+  Object.keys(by).forEach(id => { if (by[id].length > 1) dup[id] = by[id]; });
+  return dup;
+}
+
+/** 処理済みファイルのIDだけを読む(行が増えても軽いように1列だけ) */
+function seenIds_() {
+  const sh = sheet_(SH_SEEN);
+  const n = sh.getLastRow() - 1;
+  if (n <= 0) return new Set();
+  return new Set(sh.getRange(2, 1, n, 1).getValues().map(r => String(r[0])));
 }
 
 /** 1つの事業者のフォルダを確認する。minAge分以内に更新されたファイル(アップロード中)は次回に回す */
 function scanFolder_(cfg, minAge) {
+  const folder = DriveApp.getFolderById(String(cfg.folder_id).trim());
+  const folderName = folder.getName();
+  const cutoff = Date.now() - minAge * 60 * 1000;
+  const seenSh = sheet_(SH_SEEN);
+
+  // 「見に行って」と自動確認が重なっても二重にならないよう、ロック中に処理済みとして押さえる
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
   const found = [];
-  let folderName = '';
   try {
-    const seenSh = sheet_(SH_SEEN);
-    const seen = new Set(readTable_(SH_SEEN).map(r => String(r.file_id)));
-    const cutoff = Date.now() - minAge * 60 * 1000;
-    const folder = DriveApp.getFolderById(cfg.folder_id);
-    folderName = folder.getName();
+    const seen = seenIds_();
     const it = folder.getFiles();
     while (it.hasNext()) {
       const f = it.next();
@@ -473,20 +537,22 @@ function scanFolder_(cfg, minAge) {
       if (seen.has(id)) continue;
       if (f.getMimeType() === MimeType.SHORTCUT) continue;
       if (f.getLastUpdated().getTime() > cutoff) continue;
-      found.push(f);
+      seenSh.appendRow([id, safe_(f.getName()), cfg.folder_id, '(受付中)', new Date()]);
+      found.push({ file: f, row: seenSh.getLastRow() });
       seen.add(id);
     }
   } finally {
     lock.releaseLock();
   }
   // createJob_ が同じロックを使うので、ロックを外してからジョブにする
-  const made = found.map(f => {
+  const made = found.map(x => {
+    const f = x.file;
     const copy = f.makeCopy(f.getName(), jobFolder_(cfg.config));
     const jobId = createJob_({
       source: 'folder', cfg: cfg, user: '', status: 'waiting',
-      text: '共有フォルダに追加された資料: ' + f.getName(), fileIds: [copy.getId()]
+      text: '共有フォルダ「' + folderName + '」に追加された資料: ' + f.getName(), fileIds: [copy.getId()]
     });
-    sheet_(SH_SEEN).appendRow([f.getId(), safe_(f.getName()), cfg.folder_id, jobId, new Date()]);
+    seenSh.getRange(x.row, 4).setValue(jobId);
     return { id: jobId, name: f.getName() };
   });
   if (made.length) {
@@ -497,6 +563,29 @@ function scanFolder_(cfg, minAge) {
   }
   made.folderName = folderName;
   return made;
+}
+
+/** 手動で実行: FOLDER_ROOT_ID の中のフォルダを「フォルダ一覧」シートに書き出す(設定シートへの貼り付け用) */
+function listFolders() {
+  const root = DriveApp.getFolderById(prop_('FOLDER_ROOT_ID'));
+  const registered = {};
+  readTable_(SH_CONFIG).forEach(c => {
+    const id = String(c.folder_id || '').trim();
+    if (id) (registered[id] = registered[id] || []).push(c.config + '(' + c['事業者名'] + ')');
+  });
+  const rows = [];
+  const it = root.getFolders();
+  while (it.hasNext()) {
+    const f = it.next();
+    const reg = registered[f.getId()] || [];
+    rows.push([f.getName(), f.getId(), f.getUrl(), reg.join(', '), reg.length > 1 ? '⚠ 複数の事業者に登録' : (reg.length ? '' : '未登録')]);
+  }
+  rows.sort((a, b) => String(a[0]).localeCompare(String(b[0]), 'ja'));
+  const ss = ss_();
+  const sh = ss.getSheetByName(SH_FOLDERS) || ss.insertSheet(SH_FOLDERS);
+  sh.clear();
+  sh.getRange(1, 1, 1, 5).setValues([['フォルダ名', 'folder_id', 'URL', '登録先', '状態']]);
+  if (rows.length) sh.getRange(2, 1, rows.length, 5).setNumberFormat('@').setValues(rows);
 }
 
 /** Chat の「見に行って」: そのスペースの事業者のフォルダだけを今すぐ確認する */
@@ -518,7 +607,7 @@ function startJobs_(ids, user, cfg) {
     let started = 0;
     const lines = ids.map(id => {
       const job = jobs.find(j => j.id === id);
-      if (!job) return id + ' が見つかりません。';
+      if (!job) return notFound_(id);
       if (String(job.space) !== String(cfg.space)) return id + ' はこのスペースのジョブではありません。';
       if (job.status !== 'waiting') return id + ' は「' + (STATUS_JA[job.status] || job.status) + '」のため対象外です。';
       updateJob_(job, { status: 'queued', requested_by: user, note: appendNote_(job, '仕訳指示 ' + user) });
@@ -531,10 +620,49 @@ function startJobs_(ids, user, cfg) {
   }
 }
 
-/** フォルダ監視のトリガーを4時間ごとに設定 */
+/** トリガーを設定: フォルダ監視は4時間ごと、ジョブの整理は毎日深夜 */
 function installTriggers() {
   ScriptApp.getProjectTriggers()
-    .filter(t => t.getHandlerFunction() === 'watchFolders')
+    .filter(t => ['watchFolders', 'watchFoldersContinue', 'archiveJobs'].indexOf(t.getHandlerFunction()) >= 0)
     .forEach(t => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('watchFolders').timeBased().everyHours(4).create();
+  ScriptApp.newTrigger('archiveJobs').timeBased().everyDays(1).atHour(3).create();
+}
+
+/* ===== ジョブの整理 ===== */
+
+/** 毎日実行: 終わってから日数のたったジョブを「ジョブ履歴」シートへ移す(ジョブシートを軽く保つ)
+ *  移すのは 完了・却下(ARCHIVE_DAYS日)と エラー(ARCHIVE_ERROR_DAYS日)だけ。処理中・承認待ち・仕訳待ちは残す */
+function archiveJobs() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const ss = ss_();
+    const sh = ss.getSheetByName(SH_JOBS);
+    let arc = ss.getSheetByName(SH_ARCHIVE);
+    if (!arc) { arc = ss.insertSheet(SH_ARCHIVE); arc.appendRow(JOB_HEADERS); }
+
+    const values = sh.getDataRange().getValues();
+    const headers = values.shift();
+    const iStatus = headers.indexOf('status');
+    const iUpdated = headers.indexOf('updated');
+    const now = Date.now();
+    const keep = [];
+    const move = [];
+    values.forEach(r => {
+      const days = (now - new Date(r[iUpdated]).getTime()) / 86400000;
+      const st = r[iStatus];
+      const old = ((st === 'done' || st === 'rejected') && days >= ARCHIVE_DAYS) || (st === 'error' && days >= ARCHIVE_ERROR_DAYS);
+      (old ? move : keep).push(r);
+    });
+    if (!move.length) return;
+
+    // 先に履歴へ書き、そのあとでジョブシートを書き直す(途中で失敗してもジョブが消えないように)
+    arc.getRange(arc.getLastRow() + 1, 1, move.length, headers.length).setValues(move);
+    sh.getRange(2, 1, values.length, headers.length).clearContent();
+    if (keep.length) sh.getRange(2, 1, keep.length, headers.length).setValues(keep);
+    console.log('ジョブ履歴へ移動: ' + move.length + '件 / 残り: ' + keep.length + '件');
+  } finally {
+    lock.releaseLock();
+  }
 }
