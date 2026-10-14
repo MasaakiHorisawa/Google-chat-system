@@ -11,6 +11,8 @@
 
 ジョブの状態: queued → proposing → proposed(承認待ち)→ approved → registering → done / rejected / error
 監査ジョブ: queued → auditing → done / error(承認なし。MFは読むだけ)
+ルール追加ジョブ: queued → updating → done / error(worker/rules/<config>.md に1行追記)
+修正(`修正 J0001 指示`): 登録前のジョブ(proposed / 仕訳なしの done / 結果なしの error・rejected)を queued に戻し、text に【修正指示】を追記。前回案は prev_proposal としてプロンプトに渡す。
 
 ## 守るべき方針(変更するときは必ず本人に確認)
 - **MFへの登録は、内容を提示して人が承認してからだけ。** 仕訳案の作成時の claude -p には読み取り系ツールしか許可しない(`--allowedTools` / `--disallowedTools`)。
@@ -33,6 +35,8 @@
 - **以前の記録: 承認後のMF登録は一度も成功していなかった。** Renovanで tax_id が null(→ID必須の検査を追加)、免税事業者にインボイス区分を付けた(→空項目は省き、免税なら区分を付けない指示に変更)。修正版ワーカーでの再試験待ち。
 - 一次監査をChatから依頼できるようにした(`監査 2026年9月`。source=audit のジョブ、状態 auditing、読み取り専用ツールのみ)。スタブテストのみ。
 - ジョブの状態に auditing(監査中)を追加。
+- J0012 再承認で26件すべて登録。#16・#21 が照合で差異(内容は未確認)。照合の摘要は NFKC・空白の揺れを同一視するよう変更。
+- 精度向上のため、Chat から「修正 J0012 指示」で何度でも作り直し、「ルール追加 ○○」で事業者ルールに追記できるようにした。仕訳案は同じ取引先の直近12か月の過去仕訳に揃え、根拠を summary に書かせる。スタブテストのみ。
 
 ## 既知の制限・今後の候補
 - Chatに直接アップロードした添付は取得できない場合がある(Driveからの添付・共有フォルダは可)。

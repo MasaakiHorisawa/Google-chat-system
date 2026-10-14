@@ -122,6 +122,8 @@ function proposePrompt(job, fileNames) {
 - 最初に事業者情報を取得し、事業者コードが ${job.office_code} であることを確認する。違う場合は仕訳を作らず、summary に「事業者が一致しません」と書いて journals を空にする。
 - MFへの登録・更新は絶対にしない(このステップは案を作るだけ)。
 - 勘定科目・補助科目・税区分の ID は、MFから取得した一覧や、同じ取引先の過去仕訳から取る。推測で作らない。
+- 取引ごとに、同じ取引先・同じ内容の過去の仕訳(少なくとも直近12か月)を探し、科目・補助科目・税区分・インボイス区分・摘要の書き方をそれに揃える。揃えた根拠(何月のどの仕訳か)を summary に短く書く。過去と違う処理にする場合は理由を書く。
+- 下の「この事業者の仕訳ルール」と「修正指示」は、過去の仕訳より優先する。
 - 過去の仕訳を確認し、同じ内容がすでに登録されていないか調べる。重複の疑いがあるものは journals に入れず、summary の「確認事項」に書く。
 - 読めない・判断できないものは推測で埋めず、「確認事項」に書く。
 - 仕訳のメモ(memo)には元のファイル名を入れる。ファイルがない場合は「Chat投稿 ${job.id}」とする。
@@ -134,7 +136,11 @@ function proposePrompt(job, fileNames) {
 ${rulesFor(job.config)}
 
 # 入力
-投稿内容: ${job.text || '(なし)'}
+投稿内容(【修正指示】があれば、それが担当者からの最新の指示): ${job.text || '(なし)'}
+${job.prev_proposal ? `
+# 前回の仕訳案(担当者の修正指示を反映して作り直す。指示と関係ない部分は、正しければそのまま残す)
+${job.prev_proposal}
+` : ''}
 添付ファイル(作業フォルダにあります。Read で読んでください): ${fileNames.length ? fileNames.join(', ') : '(なし)'}
 
 # 出力
@@ -222,7 +228,7 @@ ${JSON.stringify(journals, null, 2)}
 function signature(j) {
   const rows = [];
   (j.branches || []).forEach(b => {
-    const remark = String(b.remark || '').trim();
+    const remark = String(b.remark || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
     if (remark) rows.push('remark|' + remark);
     ['debitor', 'creditor'].forEach(side => {
       const x = b[side];
@@ -253,6 +259,17 @@ async function handleRegister(job) {
   });
   const error = out.error || (results.length !== journals.length ? `登録件数が一致しません(予定${journals.length} / 結果${results.length})` : '');
   return { ok: !error, error, result: { results } };
+}
+
+/* ---------- 仕訳ルールの追記(Chat の「ルール追加」) ---------- */
+
+function handleRule(job) {
+  const line = String(job.text || '').replace(/\s+/g, ' ').trim();
+  if (!line) throw new Error('ルールが空です');
+  const p = path.join(RULES_DIR, safeName(job.config) + '.md');
+  const day = new Date().toISOString().slice(0, 10);
+  const prefix = fs.existsSync(p) && !fs.readFileSync(p, 'utf8').endsWith('\n') ? '\n' : '';
+  fs.appendFileSync(p, `${prefix}- ${line}(${day} ${job.user || ''} がChatで追加)\n`, 'utf8');
 }
 
 /* ---------- 一次監査(読み取りのみ) ---------- */
@@ -312,6 +329,9 @@ async function processOne() {
     } else if (job.kind === 'register') {
       const r = await handleRegister(job);
       await api('result', { id: job.id, kind: 'register', ok: r.ok, error: r.error, result: r.result });
+    } else if (job.kind === 'rule') {
+      handleRule(job);
+      await api('result', { id: job.id, kind: 'rule', ok: true });
     } else if (job.kind === 'audit') {
       const report = await handleAudit(job);
       await api('result', { id: job.id, kind: 'audit', ok: true, report });

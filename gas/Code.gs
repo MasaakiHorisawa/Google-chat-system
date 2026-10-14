@@ -22,7 +22,7 @@ const SEEN_HEADERS = ['file_id', 'ファイル名', 'folder_id', 'ジョブID', 
 
 const STATUS_JA = {
   queued: '受付済み', proposing: '仕訳案を作成中', proposed: '承認待ち', approved: '承認済み(登録待ち)',
-  registering: '登録中', auditing: '監査中', done: '完了', rejected: '却下', error: 'エラー'
+  registering: '登録中', auditing: '監査中', updating: 'ルール更新中', done: '完了', rejected: '却下', error: 'エラー'
 };
 
 const HELP_TEXT = [
@@ -30,6 +30,8 @@ const HELP_TEXT = [
   '・明細や証憑を添付するか、取引の内容を書いて送る → 仕訳案を作ります',
   '・「承認 J0001」→ その仕訳案を登録します',
   '・「却下 J0001」→ 登録しません',
+  '・「修正 J0001 ○○」→ 指示(確認事項への回答など)を反映して仕訳案を作り直します。何度でもできます',
+  '・「ルール追加 ○○」→ この会社の仕訳ルールに追記します(次の仕訳案から反映)',
   '・「状態」→ 処理中・承認待ちのジョブを表示します',
   '・「監査 2026年9月」→ その期間の仕訳を一次監査して結果を投稿します(MFは読むだけ。期間を省くと前月)'
 ].join('\n');
@@ -163,6 +165,14 @@ function onMessage(event) {
   const d = text.match(/^(承認|却下)\s*(J\d+)/i);
   if (d) return reply_(decide_(d[1], d[2].toUpperCase(), user, cfg));
   if (/^(状態|ステータス)$/.test(text)) return reply_(statusText_(cfg));
+  const r = text.match(/^修正\s*(J\d+)\s*([\s\S]*)$/i);
+  if (r) return reply_(revise_(r[1].toUpperCase(), r[2].trim(), user, cfg));
+  const rule = text.match(/^ルール追加\s*([\s\S]*)$/);
+  if (rule) {
+    if (!rule[1].trim()) return reply_('追加するルールを書いてください(例: ルール追加 ヤオコーは福利厚生費)。');
+    const id = createJob_({ source: 'rule', cfg: cfg, user: user, text: rule[1].trim() });
+    return reply_('ルールの追加を受け付けました(' + id + ')。反映したらこのスペースに投稿します。');
+  }
   const a = text.match(/^監査\s*(.*)$/);
   if (a) {
     const id = createJob_({ source: 'audit', cfg: cfg, user: user, text: a[1].trim() || '前月' });
@@ -196,8 +206,32 @@ function decide_(word, id, user, cfg) {
   return id + ' を却下しました。登録はしません。';
 }
 
+/** 承認前の仕訳案を、指示を足して作り直す(登録が始まったものは対象外) */
+function revise_(id, instruction, user, cfg) {
+  if (!instruction) return '修正の指示を書いてください(例: 修正 ' + id + ' ヤオコーは福利厚生費にして)。';
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const job = getJob_(id);
+    if (!job) return id + ' が見つかりません。';
+    if (String(job.space) !== String(cfg.space)) return id + ' はこのスペースのジョブではありません。';
+    if (job.source === 'audit' || job.source === 'rule') return id + ' は仕訳のジョブではありません。';
+    const notRegistered = job.status === 'proposed' || (job.status === 'done' && !job.result) || (job.status === 'error' && !job.result) || (job.status === 'rejected' && !job.result);
+    if (!notRegistered) return id + ' は「' + (STATUS_JA[job.status] || job.status) + '」のため修正できません(登録が始まったジョブは作り直せません)。';
+    const stamp = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'M/d H:mm');
+    updateJob_(job, {
+      status: 'queued',
+      text: String(job.text || '') + '\n【修正指示 ' + stamp + ' ' + user + '】' + instruction,
+      note: appendNote_(job, '修正指示')
+    });
+    return id + ' の修正を受け付けました。指示を反映した仕訳案ができたら投稿します。';
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function statusText_(cfg) {
-  const open = ['queued', 'proposing', 'proposed', 'approved', 'registering', 'auditing', 'error'];
+  const open = ['queued', 'proposing', 'proposed', 'approved', 'registering', 'auditing', 'updating', 'error'];
   const jobs = readTable_(SH_JOBS).filter(j => String(j.space) === String(cfg.space) && open.indexOf(j.status) >= 0);
   if (!jobs.length) return '処理中・承認待ちのジョブはありません。';
   return jobs.map(j => j.id + ' ' + (STATUS_JA[j.status] || j.status) + ' ' + String(j.text).slice(0, 30)).join('\n');
@@ -298,9 +332,18 @@ function nextJob_() {
       return { job: base };
     }
 
+    if (job.source === 'rule') {
+      updateJob_(job, { status: 'updating' });
+      base.kind = 'rule';
+      base.text = String(job.text || '');
+      base.user = String(job.requested_by || '');
+      return { job: base };
+    }
+
     updateJob_(job, { status: 'proposing' });
     base.kind = 'propose';
     base.text = String(job.text || '');
+    base.prev_proposal = job.proposal ? loadBig_(job.proposal) : '';
     base.files = String(job.file_ids || '').split(',').filter(String).map(id => {
       const f = DriveApp.getFileById(id);
       const b = f.getBlob();
@@ -358,6 +401,14 @@ function result_(b) {
         items.map(r => '#' + r.index + ' ' + (r.journal_id || '未登録') + ' ' + (r.ok ? 'OK' : '差異あり')).join('\n'));
     return { ok: true };
   }
+  if (b.kind === 'rule') {
+    if (job.status !== 'updating') return { error: 'status mismatch: ' + job.status };
+    updateJob_(job, { status: b.ok ? 'done' : 'error', note: b.ok ? job.note : appendNote_(job, b.error) });
+    postToSpace_(cfg, b.ok ? '📘 ' + job.id + ' 仕訳ルールに追加しました: ' + job.text
+                           : '❌ ' + job.id + ' ルールを追加できませんでした: ' + b.error);
+    return { ok: true };
+  }
+
   if (b.kind === 'audit') {
     if (job.status !== 'auditing') return { error: 'status mismatch: ' + job.status };
     if (!b.ok) {
