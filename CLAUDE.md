@@ -12,6 +12,7 @@
 - `セットアップ手順.md` … 導入手順と既知の制限。
 
 共有フォルダの資料: 4時間ごと(または Chat の「見に行って」)に検知 → waiting(仕訳待ち)でスペースに「仕訳しますか？」と投稿 →「仕訳 J0001」で queued へ(「却下」で rejected)。waiting はワーカーに渡さない。
+連携明細(カード・銀行)の未仕訳: 毎朝7時(checkFeeds)または Chat の「明細確認」で feed_check ジョブ → checking(ワーカーが getTransactions の未仕訳を数えるだけ)→ 1件以上なら source=feed・waiting にして「仕訳しますか？」→「仕訳 J0001」で propose_feed(古い順に最大100件、二重計上の疑いは skipped)→ 承認 → register_feed(postTransactionJournalize。金額・日付は明細のまま、相手科目だけ指定)→ 取得し直して科目・摘要を照合。承認用の一覧はワーカーが案のデータから作る(feedSummary)。同じ事業者で途中の連携明細ジョブがあれば新しく作らない。2026-10-14 スタブテストのみ。
 ジョブの状態: queued → proposing → proposed(承認待ち)→ approved → registering → done / rejected / error
 監査ジョブ: queued → auditing → done / error(承認なし。MFは読むだけ)
 ルール追加ジョブ: queued → updating → done / error(worker/rules/<config>.md に1行追記)

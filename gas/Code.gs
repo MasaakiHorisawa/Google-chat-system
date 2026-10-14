@@ -28,7 +28,7 @@ const SEEN_HEADERS = ['file_id', 'ファイル名', 'folder_id', 'ジョブID', 
 
 const STATUS_JA = {
   waiting: '仕訳待ち(指示待ち)', queued: '受付済み', proposing: '仕訳案を作成中', proposed: '承認待ち', approved: '承認済み(登録待ち)',
-  registering: '登録中', auditing: '監査中', updating: 'ルール更新中', done: '完了', rejected: '却下', error: 'エラー'
+  registering: '登録中', checking: '明細確認中', auditing: '監査中', updating: 'ルール更新中', done: '完了', rejected: '却下', error: 'エラー'
 };
 
 const HELP_TEXT = [
@@ -41,7 +41,8 @@ const HELP_TEXT = [
   '・「状態」→ 処理中・承認待ちのジョブを表示します',
   '・「監査 2026年9月」→ その期間の仕訳を一次監査して結果を投稿します(MFは読むだけ。期間を省くと前月)',
   '・「見に行って」→ 共有フォルダに新しい資料がないか、すぐに確認します(自動では4時間ごと)',
-  '・「仕訳 J0001」→ 共有フォルダの資料の仕訳案を作ります(複数可: 仕訳 J0001 J0002)。不要なら「却下 J0001」'
+  '・「明細確認」→ MFに連携しているカード・銀行の未仕訳の明細を数えます(自動では毎朝)。あれば「仕訳 J0001」で案を作ります',
+  '・「仕訳 J0001」→ 共有フォルダの資料・連携明細の仕訳案を作ります(複数可: 仕訳 J0001 J0002)。不要なら「却下 J0001」'
 ].join('\n');
 
 const CELL_LIMIT = 45000;
@@ -193,6 +194,12 @@ function onMessage(event) {
   }
   if (/^(ヘルプ|help)$/i.test(text)) return reply_(HELP_TEXT);
   if (/^(見に行って|見にいって|みにいって|フォルダ確認)$/.test(text)) return reply_(checkFolderNow_(cfg));
+  if (/^(明細確認|未仕訳確認|未仕訳)$/.test(text)) {
+    const open = openFeedJob_(cfg);
+    if (open) return reply_('連携明細のジョブ ' + open.id + ' が「' + (STATUS_JA[open.status] || open.status) + '」です。終わってから確認してください。');
+    const id = createJob_({ source: 'feed_check', cfg: cfg, user: user, text: '連携明細の未仕訳の確認' });
+    return reply_('連携明細(カード・銀行)の未仕訳を確認します(' + id + ')。MFは読むだけです。');
+  }
   const st = text.match(/^仕訳\s*((?:J\d+[\s、,]*)+)$/i);
   if (st) return reply_(startJobs_(st[1].toUpperCase().match(/J\d+/g), user, cfg));
 
@@ -248,7 +255,7 @@ function revise_(id, instruction, user, cfg) {
 }
 
 function statusText_(cfg) {
-  const open = ['waiting', 'queued', 'proposing', 'proposed', 'approved', 'registering', 'auditing', 'updating', 'error'];
+  const open = ['waiting', 'checking', 'queued', 'proposing', 'proposed', 'approved', 'registering', 'auditing', 'updating', 'error'];
   const jobs = readTable_(SH_JOBS).filter(j => String(j.space) === String(cfg.space) && open.indexOf(j.status) >= 0);
   if (!jobs.length) return '処理中・承認待ちのジョブはありません。';
   return jobs.map(j => j.id + ' ' + (STATUS_JA[j.status] || j.status) + ' ' + String(j.text).slice(0, 30)).join('\n');
@@ -337,7 +344,7 @@ function nextJob_() {
 
     if (job.status === 'approved') {
       updateJob_(job, { status: 'registering' });
-      base.kind = 'register';
+      base.kind = job.source === 'feed' ? 'register_feed' : 'register';
       base.proposal = loadBig_(job.proposal);
       return { job: base };
     }
@@ -346,6 +353,20 @@ function nextJob_() {
       updateJob_(job, { status: 'auditing' });
       base.kind = 'audit';
       base.text = String(job.text || '');
+      return { job: base };
+    }
+
+    if (job.source === 'feed_check') {
+      updateJob_(job, { status: 'checking' });
+      base.kind = 'feed_check';
+      return { job: base };
+    }
+
+    if (job.source === 'feed') {
+      updateJob_(job, { status: 'proposing' });
+      base.kind = 'propose_feed';
+      base.text = String(job.text || '');
+      base.prev_proposal = job.proposal ? loadBig_(job.proposal) : '';
       return { job: base };
     }
 
@@ -384,7 +405,7 @@ function result_(b) {
       postToSpace_(cfg, '❌ ' + job.id + ' 仕訳案を作れませんでした: ' + b.error);
       return { ok: true };
     }
-    const journals = (b.proposal && b.proposal.journals) || [];
+    const journals = (b.proposal && (b.proposal.journals || b.proposal.items)) || [];
     if (!journals.length) {
       updateJob_(job, { status: 'done', proposal: storeBig_(job, 'proposal', JSON.stringify(b.proposal)), note: appendNote_(job, '仕訳なし') });
       postToSpace_(cfg, '📝 ' + job.id + ' 登録する仕訳はありませんでした。\n' + b.summary);
@@ -402,7 +423,7 @@ function result_(b) {
     const items = res.results || [];
     const logSh = sheet_(SH_LOG);
     items.forEach(r => logSh.appendRow([
-      new Date(), String(job.office_code), cfg ? cfg['事業者名'] : '', '仕訳登録', r.journal_id || '', job.id,
+      new Date(), String(job.office_code), cfg ? cfg['事業者名'] : '', job.source === 'feed' ? '連携明細から仕訳' : '仕訳登録', r.journal_id || '', job.id,
       r.ok ? '登録後の取得で一致' : '差異: ' + JSON.stringify(r.diff || ''), job.approved_by || ''
     ]));
     const allOk = !!b.ok && items.length > 0 && items.every(r => r.ok && r.journal_id);
@@ -419,6 +440,31 @@ function result_(b) {
         items.map(r => '#' + r.index + ' ' + (r.journal_id || '未登録') + ' ' + (r.ok ? 'OK' : '差異あり')).join('\n'));
     return { ok: true };
   }
+  if (b.kind === 'feed_check') {
+    if (job.status !== 'checking') return { error: 'status mismatch: ' + job.status };
+    if (!b.ok) {
+      updateJob_(job, { status: 'error', note: appendNote_(job, b.error) });
+      postToSpace_(cfg, '❌ ' + job.id + ' 連携明細を確認できませんでした: ' + b.error);
+      return { ok: true };
+    }
+    const count = Number(b.count) || 0;
+    if (!count) {
+      updateJob_(job, { status: 'done', note: appendNote_(job, '未仕訳なし') });
+      if (job.requested_by) postToSpace_(cfg, '🏦 ' + job.id + ' 連携明細の未仕訳はありません(' + b.start + '〜' + b.end + ')。');
+      return { ok: true };
+    }
+    const detail = (b.accounts || []).map(a => '・' + safeChat_(a.name) + ' ' + a.count + '件').join('\n');
+    updateJob_(job, {
+      source: 'feed', status: 'waiting',
+      text: '連携明細の未仕訳 ' + count + '件(' + b.start + '〜' + b.end + ')' + (detail ? '\n' + detail : '')
+    });
+    postToSpace_(cfg, '🏦 連携明細(カード・銀行)に未仕訳が ' + count + '件あります(' + b.start + '〜' + b.end + ')。仕訳しますか？\n' +
+      (detail ? detail + '\n' : '') +
+      (count > 100 ? '(1回で案を作るのは古い順に100件までです。残りは次の確認で出ます)\n' : '') +
+      '\n仕訳する →「仕訳 ' + job.id + '」/ 不要 →「却下 ' + job.id + '」(アプリを@メンションして送信)');
+    return { ok: true };
+  }
+
   if (b.kind === 'rule') {
     if (job.status !== 'updating') return { error: 'status mismatch: ' + job.status };
     updateJob_(job, { status: b.ok ? 'done' : 'error', note: b.ok ? job.note : appendNote_(job, b.error) });
@@ -642,11 +688,33 @@ function startJobs_(ids, user, cfg) {
 /** トリガーを設定: フォルダ監視は4時間ごと、ジョブの整理は毎日深夜 */
 function installTriggers() {
   ScriptApp.getProjectTriggers()
-    .filter(t => ['watchFolders', 'watchFoldersContinue', 'archiveJobs'].indexOf(t.getHandlerFunction()) >= 0)
+    .filter(t => ['watchFolders', 'watchFoldersContinue', 'archiveJobs', 'checkFeeds'].indexOf(t.getHandlerFunction()) >= 0)
     .forEach(t => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('watchFolders').timeBased().everyHours(4).create();
   ScriptApp.newTrigger('archiveJobs').timeBased().everyDays(1).atHour(3).create();
+  ScriptApp.newTrigger('checkFeeds').timeBased().everyDays(1).atHour(7).create();
 }
+
+/* ===== 連携明細(カード・銀行)の未仕訳 ===== */
+
+const FEED_OPEN = ['waiting', 'queued', 'checking', 'proposing', 'proposed', 'approved', 'registering'];
+
+/** その事業者で、連携明細のジョブが途中のまま残っていればそれを返す(同じ明細の案が二重にできないように) */
+function openFeedJob_(cfg) {
+  return readTable_(SH_JOBS).find(j => String(j.config) === String(cfg.config) &&
+    (j.source === 'feed' || j.source === 'feed_check') && FEED_OPEN.indexOf(j.status) >= 0) || null;
+}
+
+/** 毎朝実行: 各事業者の未仕訳の明細を数えるジョブを作る(未仕訳があればスペースで「仕訳しますか？」と聞く) */
+function checkFeeds() {
+  configs_().forEach(cfg => {
+    if (!cfg.webhook || openFeedJob_(cfg)) return;
+    createJob_({ source: 'feed_check', cfg: cfg, user: '', text: '連携明細の未仕訳の確認(毎朝の自動確認)' });
+  });
+}
+
+/** Chat に出す外部の文字(明細の口座名・ファイル名など)から、メンションになりうる記法を外す */
+function safeChat_(v) { return String(v || '').replace(/[<>]/g, '').slice(0, 60); }
 
 /* ===== ジョブの整理 ===== */
 
