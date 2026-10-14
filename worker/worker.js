@@ -219,7 +219,7 @@ function registerPrompt(job, journals) {
 ${JSON.stringify(journals, null, 2)}
 
 # 出力
-最後に次の形のJSONを \`\`\`json ブロックで1つだけ出す。fetched は取得し直した内容を、登録時と同じ形(transaction_date と、branches の remark・debitor/creditor の account_id・sub_account_id・value)に揃えて書く。
+最後に次の形のJSONを \`\`\`json ブロックで1つだけ出す。fetched は取得し直した内容を、登録時と同じ形(transaction_date と、branches の remark・debitor/creditor の account_id・sub_account_id・value)に揃えて書く。MFが金額を税抜(value)と税額に分けて返す場合は、value はMFが返した値のまま、税額を tax_value として debitor/creditor に添える。
 { "error": "(なければ空文字)",
   "results": [ { "index": 1, "journal_id": "...", "fetched": { "transaction_date": "YYYY-MM-DD", "branches": [ ... ] } } ] }`;
 }
@@ -238,6 +238,39 @@ function signature(j) {
   return String(j.transaction_date || '').slice(0, 10) + '#' + rows.sort().join(';');
 }
 
+/**
+ * 登録した内容と取得し直した内容が一致するか。
+ * MFは課税取引の金額を税抜(value)と税額(tax_value)に分けて返すことがあるため、
+ * 取得側は「value」または「value + tax_value」のどちらかが登録時の金額と一致すればよいとする。
+ */
+function sameJournal(expected, fetched) {
+  if (!expected || !fetched) return false;
+  if (String(expected.transaction_date || '').slice(0, 10) !== String(fetched.transaction_date || '').slice(0, 10)) return false;
+  const norm = s => String(s || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+  const remarks = j => (j.branches || []).map(b => norm(b.remark)).filter(String).sort().join('\n');
+  if (remarks(expected) !== remarks(fetched)) return false;
+
+  const rows = (j, withTax) => {
+    const out = [];
+    (j.branches || []).forEach(b => ['debitor', 'creditor'].forEach(side => {
+      const x = b[side];
+      if (!x || !Number(x.value)) return;
+      const key = [side, x.account_id || '', x.sub_account_id || ''].join('|');
+      const value = Number(x.value);
+      const tax = withTax ? Number(x.tax_value || 0) : 0;
+      out.push({ key, amounts: tax ? [value, value + tax] : [value] });
+    }));
+    return out;
+  };
+  const left = rows(expected, false).map(r => r.key + '|' + r.amounts[0]);
+  for (const r of rows(fetched, true)) {
+    const i = r.amounts.map(a => left.indexOf(r.key + '|' + a)).find(n => n >= 0);
+    if (i === undefined) return false;
+    left.splice(i, 1);
+  }
+  return left.length === 0;
+}
+
 async function handleRegister(job) {
   const proposal = JSON.parse(job.proposal);
   const journals = proposal.journals || [];
@@ -253,7 +286,7 @@ async function handleRegister(job) {
   const out = extractJson(text);
   const results = (out.results || []).map(r => {
     const expected = journals[Number(r.index) - 1];
-    const ok = !!(expected && r.journal_id && r.fetched && signature(expected) === signature(r.fetched));
+    const ok = !!(r.journal_id && sameJournal(expected, r.fetched));
     return { index: r.index, journal_id: r.journal_id || '', ok,
       diff: ok ? '' : { expected: expected && signature(expected), fetched: r.fetched && signature(r.fetched) } };
   });
@@ -361,4 +394,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch(e => { log('致命的エラー', e.message); process.exit(1); });
-module.exports = { extractJson, signature, validateJournals };
+module.exports = { extractJson, signature, sameJournal, validateJournals };
