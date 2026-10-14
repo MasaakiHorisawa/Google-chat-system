@@ -126,6 +126,8 @@ function proposePrompt(job, fileNames) {
 - 読めない・判断できないものは推測で埋めず、「確認事項」に書く。
 - 仕訳のメモ(memo)には元のファイル名を入れる。ファイルがない場合は「Chat投稿 ${job.id}」とする。
 - account_id は必ずMFの一覧から取ったIDの文字列を入れる。
+- 摘要(remark)は各行(branches の要素)の直下に1つ書く。debitor・creditor の中には書かない(中に書くとMFに保存されない)。
+- MFのツールを呼ぶときは、office_code に ${job.office_code} を指定する。
 - tax_id・invoice_kind は、事業者の消費税の設定(課税事業者か免税事業者か)と過去の仕訳の付け方に合わせる。免税事業者や、過去の仕訳に税区分・インボイス区分が付いていない場合は、その項目ごと省く。sub_account_id も補助科目がなければ省く。どの項目も null や空欄にはしない。
 
 # この事業者の仕訳ルール
@@ -141,8 +143,9 @@ ${rulesFor(job.config)}
   "summary": "人が読む説明(日本語)。仕訳ごとに 日付 / 借方科目 金額 / 貸方科目 金額 / 摘要 を1行で並べ、最後に「確認事項」を箇条書き。",
   "journals": [
     { "transaction_date": "YYYY-MM-DD", "journal_type": "journal_entry", "memo": "...",
-      "branches": [ { "debitor": { "account_id": "...", "sub_account_id": "(任意)", "tax_id": "...", "invoice_kind": "...", "value": 1000, "remark": "..." },
-                      "creditor": { "account_id": "...", "tax_id": "...", "invoice_kind": "...", "value": 1000, "remark": "..." } } ] }
+      "branches": [ { "remark": "摘要",
+                      "debitor": { "account_id": "...", "sub_account_id": "(任意)", "tax_id": "(任意)", "invoice_kind": "(任意)", "value": 1000 },
+                      "creditor": { "account_id": "...", "tax_id": "(任意)", "invoice_kind": "(任意)", "value": 1000 } } ] }
   ]
 }
 journals の中身は mfc_ca_postJournals にそのまま渡せる形にすること。`;
@@ -174,6 +177,11 @@ function validateJournals(journals) {
     if (!Array.isArray(j.branches) || !j.branches.length) throw new Error(`#${i + 1} 行がありません`);
     let dr = 0, cr = 0;
     j.branches.forEach((b, k) => {
+      // 摘要は行の直下がMFの仕様。借方・貸方の中に書かれていたら移す(中に置くと保存されずに捨てられる)
+      const inner = [b.debitor, b.creditor].map(x => x && x.remark).find(r => typeof r === 'string' && r.trim());
+      if ((typeof b.remark !== 'string' || !b.remark.trim()) && inner) b.remark = inner;
+      [b.debitor, b.creditor].forEach(x => { if (x) delete x.remark; });
+      if (b.remark === null || b.remark === '') delete b.remark;
       if (b.debitor) dr += Number(b.debitor.value || 0);
       if (b.creditor) cr += Number(b.creditor.value || 0);
       // MFのAPIは null を受け付けないので、空の任意項目は省き、科目IDがないものは案の段階で弾く
@@ -197,7 +205,7 @@ function registerPrompt(job, journals) {
 
 # 手順(この順番を必ず守る)
 1. 事業者情報を取得し、事業者コードが ${job.office_code} であることを確認する。違う場合は何も登録せず、results を空にして error に理由を書く。
-2. 下の journals を1件ずつ、内容を一切変えずに mfc_ca_postJournals で登録する。追加・修正・省略はしない。
+2. 下の journals を1件ずつ、内容を一切変えずに mfc_ca_postJournals で登録する(office_code には ${job.office_code} を指定)。追加・修正・省略はしない。
 3. 登録した仕訳を mfc_ca_getJournalById で1件ずつ取得し直す。
 4. エラーが出たら、そこで止めて残りは登録しない。
 
@@ -205,15 +213,17 @@ function registerPrompt(job, journals) {
 ${JSON.stringify(journals, null, 2)}
 
 # 出力
-最後に次の形のJSONを \`\`\`json ブロックで1つだけ出す。fetched は取得し直した内容を、登録時と同じ形(transaction_date と branches の debitor/creditor の account_id・sub_account_id・value)に揃えて書く。
+最後に次の形のJSONを \`\`\`json ブロックで1つだけ出す。fetched は取得し直した内容を、登録時と同じ形(transaction_date と、branches の remark・debitor/creditor の account_id・sub_account_id・value)に揃えて書く。
 { "error": "(なければ空文字)",
   "results": [ { "index": 1, "journal_id": "...", "fetched": { "transaction_date": "YYYY-MM-DD", "branches": [ ... ] } } ] }`;
 }
 
-/** 借方・貸方の (科目, 補助科目, 金額) を並べたキーで比較する */
+/** 借方・貸方の (科目, 補助科目, 金額) と各行の摘要を並べたキーで比較する */
 function signature(j) {
   const rows = [];
   (j.branches || []).forEach(b => {
+    const remark = String(b.remark || '').trim();
+    if (remark) rows.push('remark|' + remark);
     ['debitor', 'creditor'].forEach(side => {
       const x = b[side];
       if (x && Number(x.value)) rows.push([side, x.account_id || '', x.sub_account_id || '', Number(x.value)].join('|'));
