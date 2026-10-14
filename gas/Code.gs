@@ -21,7 +21,7 @@ const LOG_HEADERS = ['日時', '事業者コード', '事業者名', '操作', '
 const SEEN_HEADERS = ['file_id', 'ファイル名', 'folder_id', 'ジョブID', '日時'];
 
 const STATUS_JA = {
-  queued: '受付済み', proposing: '仕訳案を作成中', proposed: '承認待ち', approved: '承認済み(登録待ち)',
+  waiting: '仕訳待ち(指示待ち)', queued: '受付済み', proposing: '仕訳案を作成中', proposed: '承認待ち', approved: '承認済み(登録待ち)',
   registering: '登録中', auditing: '監査中', updating: 'ルール更新中', done: '完了', rejected: '却下', error: 'エラー'
 };
 
@@ -33,7 +33,9 @@ const HELP_TEXT = [
   '・「修正 J0001 ○○」→ 指示(確認事項への回答など)を反映して仕訳案を作り直します。何度でもできます',
   '・「ルール追加 ○○」→ この会社の仕訳ルールに追記します(次の仕訳案から反映)',
   '・「状態」→ 処理中・承認待ちのジョブを表示します',
-  '・「監査 2026年9月」→ その期間の仕訳を一次監査して結果を投稿します(MFは読むだけ。期間を省くと前月)'
+  '・「監査 2026年9月」→ その期間の仕訳を一次監査して結果を投稿します(MFは読むだけ。期間を省くと前月)',
+  '・「見に行って」→ 共有フォルダに新しい資料がないか、すぐに確認します(自動では4時間ごと)',
+  '・「仕訳 J0001」→ 共有フォルダの資料の仕訳案を作ります(複数可: 仕訳 J0001 J0002)。不要なら「却下 J0001」'
 ].join('\n');
 
 const CELL_LIMIT = 45000;
@@ -100,7 +102,7 @@ function createJob_(o) {
     const now = new Date();
     const values = {
       id: id, created: now, source: o.source, space: o.cfg.space || '', office_code: String(o.cfg.office_code),
-      config: o.cfg.config, status: 'queued', requested_by: o.user || '', text: o.text || '',
+      config: o.cfg.config, status: o.status || 'queued', requested_by: o.user || '', text: o.text || '',
       file_ids: (o.fileIds || []).join(','), proposal: '', result: '', approved_by: '', updated: now, note: o.note || ''
     };
     sheet_(SH_JOBS).appendRow(JOB_HEADERS.map(h => safe_(values[h])));
@@ -179,6 +181,9 @@ function onMessage(event) {
     return reply_('監査を受け付けました(' + id + ')。MFは読むだけで、登録・変更はしません。終わったらこのスペースに投稿します。');
   }
   if (/^(ヘルプ|help)$/i.test(text)) return reply_(HELP_TEXT);
+  if (/^(見に行って|見にいって|みにいって|フォルダ確認)$/.test(text)) return reply_(checkFolderNow_(cfg));
+  const st = text.match(/^仕訳\s*((?:J\d+[\s、,]*)+)$/i);
+  if (st) return reply_(startJobs_(st[1].toUpperCase().match(/J\d+/g), user, cfg));
 
   const saved = saveAttachments_(msg.attachment || [], cfg);
   const warn = saved.errors.length ? '\n⚠ ' + saved.errors.join('\n⚠ ') : '';
@@ -196,7 +201,8 @@ function decide_(word, id, user, cfg) {
   const job = getJob_(id);
   if (!job) return id + ' が見つかりません。';
   if (String(job.space) !== String(cfg.space)) return id + ' はこのスペースのジョブではありません。';
-  if (job.status !== 'proposed') return id + ' は「' + (STATUS_JA[job.status] || job.status) + '」のため' + word + 'できません。';
+  const ok = job.status === 'proposed' || (word === '却下' && job.status === 'waiting');
+  if (!ok) return id + ' は「' + (STATUS_JA[job.status] || job.status) + '」のため' + word + 'できません。';
 
   if (word === '承認') {
     updateJob_(job, { status: 'approved', approved_by: user });
@@ -216,7 +222,7 @@ function revise_(id, instruction, user, cfg) {
     if (!job) return id + ' が見つかりません。';
     if (String(job.space) !== String(cfg.space)) return id + ' はこのスペースのジョブではありません。';
     if (job.source === 'audit' || job.source === 'rule') return id + ' は仕訳のジョブではありません。';
-    const notRegistered = job.status === 'proposed' || (job.status === 'done' && !job.result) || (job.status === 'error' && !job.result) || (job.status === 'rejected' && !job.result);
+    const notRegistered = job.status === 'proposed' || job.status === 'waiting' || (job.status === 'done' && !job.result) || (job.status === 'error' && !job.result) || (job.status === 'rejected' && !job.result);
     if (!notRegistered) return id + ' は「' + (STATUS_JA[job.status] || job.status) + '」のため修正できません(登録が始まったジョブは作り直せません)。';
     const stamp = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'M/d H:mm');
     updateJob_(job, {
@@ -231,7 +237,7 @@ function revise_(id, instruction, user, cfg) {
 }
 
 function statusText_(cfg) {
-  const open = ['queued', 'proposing', 'proposed', 'approved', 'registering', 'auditing', 'updating', 'error'];
+  const open = ['waiting', 'queued', 'proposing', 'proposed', 'approved', 'registering', 'auditing', 'updating', 'error'];
   const jobs = readTable_(SH_JOBS).filter(j => String(j.space) === String(cfg.space) && open.indexOf(j.status) >= 0);
   if (!jobs.length) return '処理中・承認待ちのジョブはありません。';
   return jobs.map(j => j.id + ' ' + (STATUS_JA[j.status] || j.status) + ' ' + String(j.text).slice(0, 30)).join('\n');
@@ -441,38 +447,89 @@ function baselineFolders() {
   });
 }
 
-/** 時間トリガーで実行: 新しいファイルをジョブにする(フォルダ直下のみ) */
+/** 時間トリガーで実行: 新しいファイルを「仕訳待ち」のジョブにして、スペースで指示を待つ(フォルダ直下のみ) */
 function watchFolders() {
-  const seenSh = sheet_(SH_SEEN);
-  const seen = new Set(readTable_(SH_SEEN).map(r => String(r.file_id)));
-  const cutoff = Date.now() - 10 * 60 * 1000; // 更新直後(アップロード中)は次回に回す
-
   configs_().filter(c => c.folder_id).forEach(cfg => {
-    let folder;
-    try { folder = DriveApp.getFolderById(cfg.folder_id); } catch (e) { return; }
-    const it = folder.getFiles();
+    try { scanFolder_(cfg, 10); } catch (e) { console.error(cfg.config + ': ' + e.message); }
+  });
+}
+
+/** 1つの事業者のフォルダを確認する。minAge分以内に更新されたファイル(アップロード中)は次回に回す */
+function scanFolder_(cfg, minAge) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  const found = [];
+  try {
+    const seenSh = sheet_(SH_SEEN);
+    const seen = new Set(readTable_(SH_SEEN).map(r => String(r.file_id)));
+    const cutoff = Date.now() - minAge * 60 * 1000;
+    const it = DriveApp.getFolderById(cfg.folder_id).getFiles();
     while (it.hasNext()) {
       const f = it.next();
       const id = f.getId();
       if (seen.has(id)) continue;
       if (f.getMimeType() === MimeType.SHORTCUT) continue;
       if (f.getLastUpdated().getTime() > cutoff) continue;
-
-      const copy = f.makeCopy(f.getName(), jobFolder_(cfg.config));
-      const jobId = createJob_({
-        source: 'folder', cfg: cfg, user: '', text: '共有フォルダに追加された資料: ' + f.getName(), fileIds: [copy.getId()]
-      });
-      seenSh.appendRow([id, safe_(f.getName()), cfg.folder_id, jobId, new Date()]);
+      found.push(f);
       seen.add(id);
-      postToSpace_(cfg, '📥 共有フォルダの新しい資料を受け付けました(' + jobId + '): ' + f.getName());
     }
+  } finally {
+    lock.releaseLock();
+  }
+  // createJob_ が同じロックを使うので、ロックを外してからジョブにする
+  const made = found.map(f => {
+    const copy = f.makeCopy(f.getName(), jobFolder_(cfg.config));
+    const jobId = createJob_({
+      source: 'folder', cfg: cfg, user: '', status: 'waiting',
+      text: '共有フォルダに追加された資料: ' + f.getName(), fileIds: [copy.getId()]
+    });
+    sheet_(SH_SEEN).appendRow([f.getId(), safe_(f.getName()), cfg.folder_id, jobId, new Date()]);
+    return { id: jobId, name: f.getName() };
   });
+  if (made.length) {
+    const ids = made.map(m => m.id).join(' ');
+    postToSpace_(cfg, '📥 共有フォルダに新しい資料があります。仕訳しますか？\n' +
+      made.map(m => m.id + ' ' + m.name).join('\n') +
+      '\n\n仕訳する →「仕訳 ' + ids + '」(一部だけでも可)/ 不要 →「却下 ' + made[0].id + '」(アプリを@メンションして送信)');
+  }
+  return made;
 }
 
-/** フォルダ監視のトリガーを1時間ごとに設定 */
+/** Chat の「見に行って」: そのスペースの事業者のフォルダだけを今すぐ確認する */
+function checkFolderNow_(cfg) {
+  if (!cfg.folder_id) return 'この事業者には共有フォルダが設定されていません(設定シートの folder_id)。';
+  let made;
+  try { made = scanFolder_(cfg, 1); } catch (e) { return '共有フォルダを確認できませんでした: ' + e.message; }
+  return made.length ? made.length + '件の新しい資料がありました(一覧をこのスペースに投稿しました)。'
+                     : '新しい資料はありませんでした(1分以内に入れたファイルは次の確認で拾います)。';
+}
+
+/** 「仕訳 J0001 J0002」: 仕訳待ちのジョブを仕訳案の作成に回す */
+function startJobs_(ids, user, cfg) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const jobs = readTable_(SH_JOBS);
+    let started = 0;
+    const lines = ids.map(id => {
+      const job = jobs.find(j => j.id === id);
+      if (!job) return id + ' が見つかりません。';
+      if (String(job.space) !== String(cfg.space)) return id + ' はこのスペースのジョブではありません。';
+      if (job.status !== 'waiting') return id + ' は「' + (STATUS_JA[job.status] || job.status) + '」のため対象外です。';
+      updateJob_(job, { status: 'queued', requested_by: user, note: appendNote_(job, '仕訳指示 ' + user) });
+      started++;
+      return id + ' の仕訳案を作ります。';
+    });
+    return lines.join('\n') + (started ? '\nできたらこのスペースに投稿します。' : '');
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** フォルダ監視のトリガーを4時間ごとに設定 */
 function installTriggers() {
   ScriptApp.getProjectTriggers()
     .filter(t => t.getHandlerFunction() === 'watchFolders')
     .forEach(t => ScriptApp.deleteTrigger(t));
-  ScriptApp.newTrigger('watchFolders').timeBased().everyHours(1).create();
+  ScriptApp.newTrigger('watchFolders').timeBased().everyHours(4).create();
 }
