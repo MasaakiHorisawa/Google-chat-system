@@ -411,8 +411,9 @@ function result_(b) {
       result: storeBig_(job, 'result', JSON.stringify(res)),
       note: b.error ? appendNote_(job, b.error) : job.note
     });
+    const renamed = allOk && job.source === 'folder' ? markEntered_(job) : '';
     postToSpace_(cfg, allOk
-      ? '✅ ' + job.id + ' ' + items.length + '件を登録し、取得し直して内容の一致を確認しました。'
+      ? '✅ ' + job.id + ' ' + items.length + '件を登録し、取得し直して内容の一致を確認しました。' + renamed
       : '⚠ ' + job.id + ' 登録で問題がありました。途中まで登録されている可能性があるので、MFで確認してください。\n' +
         (b.error ? b.error + '\n' : '') +
         items.map(r => '#' + r.index + ' ' + (r.journal_id || '未登録') + ' ' + (r.ok ? 'OK' : '差異あり')).join('\n'));
@@ -563,6 +564,24 @@ function scanFolder_(cfg, minAge) {
   }
   made.folderName = folderName;
   return made;
+}
+
+/** 登録と照合がすべて済んだ共有フォルダの資料に「入力済_」を付ける(お客さんにも入力済みと分かるように)
+ *  名前を変えるのは GAS だけ。Claude(ワーカー)は Drive に触れない。対象は処理済みファイルシートでこのジョブに結び付いた元ファイルだけ */
+const ENTERED_PREFIX = '入力済_';
+function markEntered_(job) {
+  try {
+    const row = readTable_(SH_SEEN).find(r => String(r['ジョブID']) === String(job.id));
+    if (!row) return '';
+    const f = DriveApp.getFileById(String(row.file_id));
+    const name = f.getName();
+    if (name.indexOf(ENTERED_PREFIX) === 0) return '';
+    f.setName(ENTERED_PREFIX + name);
+    return '\n共有フォルダの資料の名前を「' + ENTERED_PREFIX + name + '」に変えました。';
+  } catch (e) {
+    // 名前の変更に失敗しても登録結果には影響させない
+    return '\n(共有フォルダの資料の名前は変えられませんでした: ' + e.message + ')';
+  }
 }
 
 /** 手動で実行: FOLDER_ROOT_ID の中のフォルダを「フォルダ一覧」シートに書き出す(設定シートへの貼り付け用) */
