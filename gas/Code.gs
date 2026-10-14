@@ -459,11 +459,14 @@ function scanFolder_(cfg, minAge) {
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
   const found = [];
+  let folderName = '';
   try {
     const seenSh = sheet_(SH_SEEN);
     const seen = new Set(readTable_(SH_SEEN).map(r => String(r.file_id)));
     const cutoff = Date.now() - minAge * 60 * 1000;
-    const it = DriveApp.getFolderById(cfg.folder_id).getFiles();
+    const folder = DriveApp.getFolderById(cfg.folder_id);
+    folderName = folder.getName();
+    const it = folder.getFiles();
     while (it.hasNext()) {
       const f = it.next();
       const id = f.getId();
@@ -488,10 +491,11 @@ function scanFolder_(cfg, minAge) {
   });
   if (made.length) {
     const ids = made.map(m => m.id).join(' ');
-    postToSpace_(cfg, '📥 共有フォルダに新しい資料があります。仕訳しますか？\n' +
+    postToSpace_(cfg, '📥 共有フォルダ「' + folderName + '」に新しい資料があります。仕訳しますか？\n' +
       made.map(m => m.id + ' ' + m.name).join('\n') +
       '\n\n仕訳する →「仕訳 ' + ids + '」(一部だけでも可)/ 不要 →「却下 ' + made[0].id + '」(アプリを@メンションして送信)');
   }
+  made.folderName = folderName;
   return made;
 }
 
@@ -500,8 +504,9 @@ function checkFolderNow_(cfg) {
   if (!cfg.folder_id) return 'この事業者には共有フォルダが設定されていません(設定シートの folder_id)。';
   let made;
   try { made = scanFolder_(cfg, 1); } catch (e) { return '共有フォルダを確認できませんでした: ' + e.message; }
-  return made.length ? made.length + '件の新しい資料がありました(一覧をこのスペースに投稿しました)。'
-                     : '新しい資料はありませんでした(1分以内に入れたファイルは次の確認で拾います)。';
+  const where = '共有フォルダ「' + made.folderName + '」';
+  return made.length ? where + 'に' + made.length + '件の新しい資料がありました(一覧をこのスペースに投稿しました)。'
+                     : where + 'に新しい資料はありませんでした(1分以内に入れたファイルは次の確認で拾います)。';
 }
 
 /** 「仕訳 J0001 J0002」: 仕訳待ちのジョブを仕訳案の作成に回す */
