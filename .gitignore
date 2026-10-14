@@ -1,2 +1,12 @@
 # Claude Code の監査ログ(各環境の記録。リポジトリに入れない)
 .claude/audit-logs/
+
+# 秘密情報(APIキー・トークン)
+worker/settings.json
+worker/mcp/*.json
+!worker/mcp/*.example.json
+
+# 作業データ・ログ
+worker/work/
+worker/*.log
+node_modules/

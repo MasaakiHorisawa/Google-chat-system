@@ -1,0 +1,10 @@
+{
+  "gasUrl": "https://script.google.com/macros/s/(WebアプリのデプロイID)/exec",
+  "token": "(GASのスクリプトプロパティ WORKER_TOKEN と同じ文字列)",
+  "pollSeconds": 30,
+  "claudeTimeoutMinutes": 15,
+  "claudeCommand": "claude",
+  "mcpConfigDir": "C:\\mf-mcp",
+  "mcpToolPrefix": "mcp__mfc_ca__mfc_ca_",
+  "model": ""
+}
