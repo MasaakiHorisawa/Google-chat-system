@@ -1,0 +1,9 @@
+{
+  "name": "google-chat-system",
+  "private": true,
+  "description": "Google Chat アプリ: 議事録システムの関与先ノートを読む",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "sync:check": "node tools/sync.js check"
+  }
+}
