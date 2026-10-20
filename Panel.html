@@ -149,8 +149,9 @@
     行は消さず、状態を「廃止」「取消」「重複」に変えて残します(後から経緯を追えるように)。</div>
   <div class="row">
     <div style="flex:4"><label>① 税理士のフィードバック</label>
-      <textarea id="fbText" style="height:120px;font-size:12px" placeholder="チャット・メール・レビューのコメントをそのまま貼り付け"></textarea></div>
+      <textarea id="fbText" style="height:120px;font-size:12px" placeholder="チャット・メール・レビューのコメントをそのまま貼り付け(画像だけのときは空でよい)"></textarea></div>
     <div><label>出典</label><input type="text" id="fbSource" value="税理士FB">
+      <div style="margin-top:6px"><input type="checkbox" id="fbImg"> <label for="fbImg" style="display:inline" title="スクリーンショット・写真は、Geminiにプロンプトを貼るときに同じメッセージへ添付します">画像あり</label></div>
       <div style="margin-top:8px"><button id="btnFbPrompt">① プロンプトをコピー</button></div>
       <div style="margin-top:6px"><a class="muted" href="https://gemini.google.com/app">Geminiを開く</a></div></div>
   </div>
@@ -249,7 +250,7 @@
 <script>
   const $ = id => document.getElementById(id);
   const DEFAULT_LANG = '日本語';
-  const PANEL_VERSION = '2026-10-20a'; // Code.gs の CFG.VERSION と同じ値にする
+  const PANEL_VERSION = '2026-10-20b'; // Code.gs の CFG.VERSION と同じ値にする
   let clients = [], questions = [], tpl = null, sendInfo = null;
 
   function status(kind, text, links, actions) {
@@ -790,12 +791,15 @@
   function copyFeedbackPrompt() {
     const name = $('client').value, t = $('fbText').value.trim();
     if (!name) return fail('関与先を選択または登録してください');
-    if (t.length < 5) return fail('税理士のフィードバックを貼り付けてください');
+    const img = $('fbImg').checked;
+    if (!img && t.length < 5) return fail('税理士のフィードバックを貼り付けてください(画像だけのときは「画像あり」にチェック)');
     if (!fbTpl || fbTpl.client !== name) return status('info', name + ' の情報を読み込み中です。数秒後にもう一度押してください');
     const s = fbTpl.template.replace('{{SOURCE}}', () => $('fbSource').value.trim() || '税理士FB');
-    const text = s.slice(0, s.lastIndexOf('{{TEXT}}')) + t;
+    // 画像はパネルを通さず、Gemini(Claude)のメッセージに直接添付してもらう
+    const text = s.slice(0, s.lastIndexOf('{{TEXT}}')) + (img ? '(このメッセージに画像を添付しています。画像の内容もフィードバックとして読んでください)\n' : '') + t;
     if (!copyText(text)) return fail('コピーできませんでした。もう一度押してください');
-    status('ok', '「' + name + '」用のプロンプトをコピーしました。Gemini(またはClaude)に貼り付けて送信し、返ってきたJSONを②に貼ってください\n',
+    status('ok', '「' + name + '」用のプロンプトをコピーしました。Gemini(またはClaude)に貼り付け' +
+      (img ? '、同じメッセージにスクリーンショット・写真を添付して' : '') + '送信し、返ってきたJSONを②に貼ってください\n',
       [{ label: 'Geminiを開く', url: 'https://gemini.google.com/app' }]);
     $('fbResult').focus();
   }
@@ -841,7 +845,7 @@
     status('info', '反映中です');
     call('applyFeedback', [{ client: fbPlan.client, source: $('fbSource').value.trim(), actions: acts.map(a => ({ type: a.type, data: a.data })) }], r => {
       fbPlan = null; renderFbPlan();
-      $('fbText').value = ''; $('fbResult').value = '';
+      $('fbText').value = ''; $('fbResult').value = ''; $('fbImg').checked = false;
       status(r.errors.length ? 'err' : 'ok', '反映しました: ' + (r.counts.join(' / ') || 'なし') +
         (r.errors.length ? '\n反映できなかったもの(案を作った後にシートが変わったなど):\n・' + r.errors.join('\n・') : '') + '\n',
         [{ label: 'カルテを開く', url: r.karteUrl }, { label: '質問票を開く', url: r.questionsUrl }, { label: 'タスクを開く', url: r.todosUrl },
