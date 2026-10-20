@@ -16,15 +16,14 @@
 const CFG = {
   // Code.gs と Panel.html は必ず同じ版を入れる。片方だけ古いと、言語の指定などが黙って効かなくなるため、版が違えば止める
   // 修正を配るたびに、Panel.html の PANEL_VERSION と一緒に上げる
-  VERSION: '2026-10-21a',
+  VERSION: '2026-10-21b',
   MASTER_SHEET: '関与先マスタ',
   RULES_SHEET: '共通ルール', // 全関与先に効く処理ルール(税理士のフィードバックから追加)。マスターSSに置く
   RULE_SCENES: ['常時', '決算', '月次'], // 共通ルールF列「使う場面」。決算 のルールは決算タスクにチェック項目として入る
   CLOSING_SHEET: '決算タスク雛形', // 決算タスクを作るときの元。マスターSSに置き、事務所で編集する
   DASHBOARD_SHEET: '全関与先タスク', // 全関与先の未完了タスクと未回答の質問(「全関与先の一覧を更新」で作り直す)
   PROGRESS_SHEET: '決算進捗',
-  FISCAL_EXTENSIONS: ['なし', '1か月', '2か月'], // 関与先マスタS列「申告期限の延長」
-  CTAX_TYPES: ['課税(本則)', '簡易課税', '2割特例', '免税'], // 関与先マスタT列「消費税」
+  CTAX_TYPES: ['課税(本則)', '簡易課税', '2割特例', '免税'], // 関与先マスタS列「消費税」
   STALE_TASK_DAYS: 180, // これより古い未完了タスクは「要確認」に出す
   SHEET_KARTE: '関与先カルテ',
   SHEET_MTG: 'MTG一覧',
@@ -38,7 +37,7 @@ const CFG = {
   DEFAULT_MODEL: 'gemini-3.8-flash',
   KARTE_CATEGORIES: ['基本情報', '仕訳ルール', '勘定科目', '仕入先・取引先', '資料の受け渡し', '注意点', '税務論点', 'その他'],
   HEADERS: {
-    MASTER: ['関与先名', '敬称', 'MFコード', 'スプレッドシートID', 'URL', 'フォルダID', '最終MTG日', '送付方法', '送付先', '先方共有フォルダ', '先方言語', '内部報告先', '次回MTG日', 'MTG前確認の自動送付', 'MTG前確認 送付済', 'MTG前確認メモ', '区分', '決算月', '申告期限の延長', '消費税'],
+    MASTER: ['関与先名', '敬称', 'MFコード', 'スプレッドシートID', 'URL', 'フォルダID', '最終MTG日', '送付方法', '送付先', '先方共有フォルダ', '先方言語', '内部報告先', '次回MTG日', 'MTG前確認の自動送付', 'MTG前確認 送付済', 'MTG前確認メモ', '区分', '決算月', '消費税'],
     KARTE: ['ID', 'カテゴリ', '項目', '内容', '出典', '状態', '更新日'],
     MTG: ['日付', 'タイトル', '参加者', '要約', '議事録Doc', '先方用Doc', '先方用PDF', 'シート名', '送付', '先方言語'],
     TODO: ['ID', 'MTG日', '担当区分', '担当者', 'タスク', '期限', '状態', '最終アップデート', '更新内容', '関連質問', '分類'],
@@ -1880,17 +1879,16 @@ function weekday_(d, dir) {
 
 /**
  * 関与先の決算期の候補(前年・今年・翌年)。end = 決算日、due = 申告期限(土日は翌営業日)、tag = タスクK列の分類。
- * 法人は関与先マスタR列の決算月とS列の延長、個人は12月決算・翌年3月15日期限。決算月が無ければ空
+ * 法人は関与先マスタR列の決算月から2か月後の月末(延長は使わない)、個人は12月決算・翌年3月15日期限。決算月が無ければ空
  */
 function closingPeriods_(client) {
   const personal = client.kind === '個人';
   const m = personal ? 12 : Number(client.fyMonth);
   if (!(m >= 1 && m <= 12)) return [];
-  const ext = Number((String(client.extension || '').match(/(\d)/) || [])[1]) || 0;
   const y = Number(Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy'));
   return [y - 1, y, y + 1].map(yy => {
     const end = monthEnd_(yy, m);
-    const due = weekday_(personal ? (yy + 1) + '-03-15' : monthEnd_(yy, m + 2 + ext), 1);
+    const due = weekday_(personal ? (yy + 1) + '-03-15' : monthEnd_(yy, m + 2), 1);
     return { end: end, due: due, tag: '決算' + end.slice(0, 7), label: personal ? yy + '年分' : yy + '年' + m + '月期' };
   });
 }
@@ -2439,7 +2437,7 @@ function listClients_() {
   return sh.getRange(2, 1, sh.getLastRow() - 1, CFG.HEADERS.MASTER.length).getDisplayValues()
     .map((v, i) => ({ row: i + 2, name: v[0], honorific: v[1] || '様', code: v[2], ssId: v[3], url: v[4], folderId: v[5],
       method: v[7], dest: v[8], sharedFolder: v[9], lang: v[10], internalHook: v[11], nextMtg: v[12], autoBrief: v[13], briefSent: v[14], briefMemo: v[15], kind: v[16],
-      fyMonth: v[17], extension: v[18], ctax: v[19] }))
+      fyMonth: v[17], ctax: v[18] }))
     .filter(c => c.name && c.ssId);
 }
 
@@ -2454,9 +2452,12 @@ function getMasterSheet_() {
   let sh = ss.getSheetByName(CFG.MASTER_SHEET);
   if (!sh) {
     sh = ss.insertSheet(CFG.MASTER_SHEET, 0);
-    initSheet_(sh, CFG.HEADERS.MASTER, [220, 60, 110, 320, 320, 260, 110, 110, 260, 320, 100, 260, 110, 150, 150, 320, 70, 70, 120, 100]);
+    initSheet_(sh, CFG.HEADERS.MASTER, [220, 60, 110, 320, 320, 260, 110, 110, 260, 320, 100, 260, 110, 150, 150, 320, 70, 70, 100]);
+  } else if (sh.getRange(1, 19).getValue() === '申告期限の延長') {
+    // 2026-10-21a で足した「申告期限の延長」列は使わないので消す(右の「消費税」列が1つ左に詰まる)
+    sh.deleteColumn(19);
   } else if (!sh.getRange(1, CFG.HEADERS.MASTER.length).getValue()) {
-    // 旧版で作ったマスタに、後から増えた列見出し(送付用のH〜J、先方言語のK、内部報告先のL、MTG前確認の自動送付用のM〜O、MTG前確認メモのP、区分のQ、決算用のR〜T)を足す
+    // 旧版で作ったマスタに、後から増えた列見出し(送付用のH〜J、先方言語のK、内部報告先のL、MTG前確認の自動送付用のM〜O、MTG前確認メモのP、区分のQ、決算用のR〜S)を足す
     sh.getRange(1, 1, 1, CFG.HEADERS.MASTER.length).setValues([CFG.HEADERS.MASTER]).setFontWeight('bold').setBackground('#e8eef7');
   }
   // H列(送付方法)をプルダウンにする。未設定のときだけ付ける
@@ -2474,8 +2475,8 @@ function getMasterSheet_() {
     sh.getRange(2, 17, sh.getMaxRows() - 1, 1).setDataValidation(
       SpreadsheetApp.newDataValidation().requireValueInList(CFG.CLIENT_KINDS, true).setAllowInvalid(false).build());
   }
-  // R列(決算月 1〜12)・S列(申告期限の延長)・T列(消費税)も同様。決算タスクの期限と項目の選び分けに使う
-  [[18, ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12']], [19, CFG.FISCAL_EXTENSIONS], [20, CFG.CTAX_TYPES]].forEach(d => {
+  // R列(決算月 1〜12)・S列(消費税)も同様。決算タスクの期限と項目の選び分けに使う
+  [[18, ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12']], [19, CFG.CTAX_TYPES]].forEach(d => {
     if (sh.getRange(2, d[0]).getDataValidation()) return;
     sh.getRange(2, d[0], sh.getMaxRows() - 1, 1).setDataValidation(
       SpreadsheetApp.newDataValidation().requireValueInList(d[1], true).setAllowInvalid(false).build());
