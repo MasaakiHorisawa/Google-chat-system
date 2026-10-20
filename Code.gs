@@ -16,7 +16,7 @@
 const CFG = {
   // Code.gs と Panel.html は必ず同じ版を入れる。片方だけ古いと、言語の指定などが黙って効かなくなるため、版が違えば止める
   // 修正を配るたびに、Panel.html の PANEL_VERSION と一緒に上げる
-  VERSION: '2026-10-20b',
+  VERSION: '2026-10-20c',
   MASTER_SHEET: '関与先マスタ',
   RULES_SHEET: '共通ルール', // 全関与先に効く処理ルール(税理士のフィードバックから追加)。マスターSSに置く
   SHEET_KARTE: '関与先カルテ',
@@ -50,6 +50,10 @@ const CFG = {
   // 質問票の行は消さずに状態で残す(IDは行番号から振るので、行を消すと次の質問とIDが重なる)
   Q_CANCELLED: '取消', // 税理士が「聞かなくてよい」とした質問
   Q_DUPLICATE: '重複', // 同じことを聞いている別の質問に一本化した質問(回答は残した方に付ける)
+  // 質問票F列「回答」に答えが入った未回答の質問は、自動で「回答済」にする(シートに直接書いた分も、読むたびに拾う)
+  // 空白・句読点を除いてこの文字数以上あれば回答とみなす。「確認中」「後日」などの途中経過だけなら未回答のまま
+  AUTO_ANSWER_MIN_CHARS: 2,
+  AUTO_ANSWER_PENDING: /^(確認中|検討中|調査中|問い?合わ?せ中|回答待ち|未定|未確認|後日|後で|保留|不明|わからない|分からない|tbd|pending|\?+|？+)/i,
   // 税理士FBで反映できる変更の種類と表示名。この順に反映する
   // (質問への回答を重複の整理より先にするのは、同じ回で答えた質問の回答を重複側にも写すため)
   FEEDBACK_TYPES: {
@@ -924,6 +928,24 @@ function addQuestion(clientName, question, reason, to) {
   const sh = ss.getSheetByName(CFG.SHEET_Q);
   const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
   sh.appendRow([nextId_(sh, 'Q'), today, s_(question), s_(reason || ''), '未回答', '', '', '手入力', questionTo_(to)]);
+  return readQuestions_(ss);
+}
+
+/** 回答として扱えるだけの中身があるか(短すぎるもの・「確認中」などの途中経過は除く) */
+function isRealAnswer_(v) {
+  const t = normText_(v);
+  if (t.length < CFG.AUTO_ANSWER_MIN_CHARS) return false;
+  return !(t.length <= 10 && CFG.AUTO_ANSWER_PENDING.test(t));
+}
+
+/** パネルの回答欄に入力した内容を保存する。回答として十分なら readQuestions_ が回答済にする */
+function saveAnswer(clientName, id, answer) {
+  const client = findClient_(clientName);
+  const ss = openNotebook_(client);
+  const sh = ss.getSheetByName(CFG.SHEET_Q);
+  const row = findRowById_(sh, id);
+  if (!row) throw new Error('質問IDが見つかりません: ' + id);
+  sh.getRange(row, 6).setValue(s_(String(answer || '').trim()));
   return readQuestions_(ss);
 }
 
@@ -1907,10 +1929,22 @@ function readKarteText_(ss) {
   return text.length > CFG.MAX_KARTE_CHARS ? text.slice(-CFG.MAX_KARTE_CHARS) : text;
 }
 
+/**
+ * 質問票を読む。読むついでに、回答欄に答えが入っている未回答の質問を「回答済」にする
+ * (人がシートに直接回答を書いて状態を変え忘れても、先方に同じ質問を出し直さないため)
+ */
 function readQuestions_(ss) {
   const sh = ss.getSheetByName(CFG.SHEET_Q);
   if (sh.getLastRow() < 2) return [];
+  const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
   return sh.getRange(2, 1, sh.getLastRow() - 1, 9).getDisplayValues()
+    .map((v, i) => {
+      if (v[0] && (v[4] === '未回答' || !v[4]) && isRealAnswer_(v[5])) {
+        v[4] = '回答済'; v[6] = v[6] || today;
+        sh.getRange(i + 2, 5, 1, 3).setValues([[v[4], s_(v[5]), v[6]]]);
+      }
+      return v;
+    })
     .filter(v => v[0])
     .map(v => ({ id: v[0], date: v[1], question: v[2], reason: v[3], status: v[4], answer: v[5], answeredAt: v[6], to: questionTo_(v[8]) }));
 }
