@@ -16,7 +16,7 @@
 const CFG = {
   // Code.gs と Panel.html は必ず同じ版を入れる。片方だけ古いと、言語の指定などが黙って効かなくなるため、版が違えば止める
   // 修正を配るたびに、Panel.html の PANEL_VERSION と一緒に上げる
-  VERSION: '2026-10-20c',
+  VERSION: '2026-10-20d',
   MASTER_SHEET: '関与先マスタ',
   RULES_SHEET: '共通ルール', // 全関与先に効く処理ルール(税理士のフィードバックから追加)。マスターSSに置く
   SHEET_KARTE: '関与先カルテ',
@@ -26,6 +26,8 @@ const CFG = {
   ROOT_FOLDER_NAME: '議事録システム',
   FOLDER_INTERNAL: '社内用',
   FOLDER_CLIENT: '先方渡し用',
+  FOLDER_FEEDBACK: '税理士FB', // 社内用フォルダの下。税理士FBタブに貼った画像を残す
+  MAX_FB_IMAGES: 6,             // 1回のフィードバックで送れる画像の枚数
   DEFAULT_MODEL: 'gemini-3.8-flash',
   KARTE_CATEGORIES: ['基本情報', '仕訳ルール', '勘定科目', '仕入先・取引先', '資料の受け渡し', '注意点', '税務論点', 'その他'],
   HEADERS: {
@@ -551,7 +553,8 @@ function getFeedbackTemplate(clientName) {
 }
 
 /**
- * フィードバックから変更案を作る(まだ何も書き込まない)。req = {client, text, source, resultJson, dupOnly}
+ * フィードバックから変更案を作る(カルテ等にはまだ何も書き込まない)。req = {client, text, source, resultJson, dupOnly, images}
+ * resultJson が無ければGemini APIを呼ぶ。images(パネルに貼った画像)はAPIに一緒に渡し、Driveの 社内用/税理士FB にも残す。
  * AIの案はIDの存在や状態を確かめ、合わないものは warnings に回す。
  * あわせて、文が同じ未回答の質問をAIを通さずに探し、重複の整理案に足す(dupOnly ならこれだけ)
  */
@@ -559,12 +562,16 @@ function planFeedback(req) {
   const client = findClient_(req.client);
   const ss = openNotebook_(client);
   const st = feedbackState_(ss);
-  let raw = {};
+  let raw = {}, saved = [];
   if (!req.dupOnly) {
     const text = String(req.text || '').trim();
-    if (!req.resultJson && text.length < 5) throw new Error('税理士のフィードバックを貼り付けてください');
+    const images = (Array.isArray(req.images) ? req.images : []).filter(im => im && /^image\/[\w.+-]+$/.test(im.mimeType) && im.data);
+    if (images.length > CFG.MAX_FB_IMAGES) throw new Error('画像は1回に' + CFG.MAX_FB_IMAGES + '枚までです');
+    if (!req.resultJson && text.length < 5 && !images.length) throw new Error('税理士のフィードバック(文章か画像)を貼り付けてください');
+    saved = saveFeedbackImages_(client, images);
+    const body = (images.length ? '(このメッセージに画像を' + images.length + '枚添付しています。画像の内容もフィードバックとして読んでください)\n' : '') + text;
     raw = req.resultJson ? parseLLMJson_(req.resultJson)
-      : callLLM_(buildFeedbackPrompt_(client, st, String(req.source || '').trim() || '税理士FB', text));
+      : callLLM_(buildFeedbackPrompt_(client, st, String(req.source || '').trim() || '税理士FB', body), images);
   }
   const actions = [], warnings = [];
   Object.keys(CFG.FEEDBACK_TYPES).forEach(type => (Array.isArray(raw[type]) ? raw[type] : []).forEach(d => {
@@ -573,7 +580,21 @@ function planFeedback(req) {
   }));
   const touched = actions.filter(a => a.type.indexOf('question_') === 0 && a.data.id).map(a => a.data.id);
   findDuplicateQuestions_(st).forEach(a => { if (touched.indexOf(a.data.id) < 0) actions.push(a); });
-  return { client: client.name, actions: actions, warnings: warnings, notes: (Array.isArray(raw.notes) ? raw.notes : []).map(String).filter(String) };
+  return { client: client.name, actions: actions, warnings: warnings, notes: (Array.isArray(raw.notes) ? raw.notes : []).map(String).filter(String),
+    images: saved };
+}
+
+/** 税理士FBに貼った画像を、関与先フォルダの 社内用/税理士FB に保存する(反映した変更の根拠を後から見られるように) */
+function saveFeedbackImages_(client, images) {
+  if (!images.length) return [];
+  const folder = subFolder_(subFolder_(clientFolder_(client), CFG.FOLDER_INTERNAL), CFG.FOLDER_FEEDBACK);
+  const stamp = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd_HHmm');
+  return images.map((im, i) => {
+    const ext = (im.mimeType.split('/')[1] || 'png').replace('jpeg', 'jpg');
+    const file = folder.createFile(Utilities.newBlob(Utilities.base64Decode(im.data), im.mimeType,
+      stamp + '_' + client.name + '_税理士FB_' + (i + 1) + '.' + ext));
+    return { name: file.getName(), url: file.getUrl() };
+  });
 }
 
 /**
@@ -586,7 +607,9 @@ function applyFeedback(req) {
   const ss = openNotebook_(client);
   const st = feedbackState_(ss);
   const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
-  const source = (String(req.source || '').trim() || '税理士FB') + ' ' + today;
+  const pics = Number(req.imageCount) || 0;
+  const source = (String(req.source || '').trim() || '税理士FB') + ' ' + today +
+    (pics ? '(画像' + pics + '枚: 社内用/' + CFG.FOLDER_FEEDBACK + ')' : '');
   const order = Object.keys(CFG.FEEDBACK_TYPES);
   const items = (Array.isArray(req.actions) ? req.actions : []).filter(a => a && order.indexOf(a.type) >= 0)
     .sort((a, b) => order.indexOf(a.type) - order.indexOf(b.type));
@@ -1303,8 +1326,11 @@ function buildIntakePrompt_(client, source, text, karteText, openQs) {
   ].join('\n');
 }
 
-/** LLM呼び出し。別のAPIに替えるときはこの関数だけ差し替える(プロンプト文字列→オブジェクト)。 */
-function callLLM_(prompt) {
+/**
+ * LLM呼び出し。別のAPIに替えるときはこの関数だけ差し替える(プロンプト文字列→オブジェクト)。
+ * images = [{mimeType, data(base64)}] を渡すと、プロンプトと一緒に画像も読ませる
+ */
+function callLLM_(prompt, images) {
   const p = PropertiesService.getScriptProperties();
   const key = p.getProperty('GEMINI_API_KEY');
   if (!key) throw new Error('APIキーが未設定です(設定タブで登録)');
@@ -1315,7 +1341,7 @@ function callLLM_(prompt) {
     contentType: 'application/json',
     headers: { 'x-goog-api-key': key },
     payload: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      contents: [{ role: 'user', parts: [{ text: prompt }].concat((images || []).map(im => ({ inlineData: { mimeType: im.mimeType, data: im.data } }))) }],
       generationConfig: { temperature: 0.2, responseMimeType: 'application/json' },
     }),
     muteHttpExceptions: true,

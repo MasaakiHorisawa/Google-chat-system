@@ -35,6 +35,12 @@
   th { font-size: 12px; color: #52606d; background: #f4f6f9; }
   td.ans { width: 38%; }
   .qlist { max-height: 380px; overflow: auto; }
+  .drop { margin-top:6px; padding:8px; border:1px dashed #c3cad3; border-radius:4px; color:#7b8794; font-size:12px; }
+  .drop.over { background:#eef3fa; border-color:#1f4e8c; }
+  .thumbs { display:flex; gap:8px; flex-wrap:wrap; margin-top:6px; }
+  .thumbs div { position:relative; }
+  .thumbs img { height:80px; border:1px solid #d9dee5; border-radius:4px; display:block; }
+  .thumbs button { position:absolute; top:2px; right:2px; padding:0 6px; font-size:12px; }
   .newclient { display: none; margin-top: 8px; padding: 10px; background: #f4f6f9; border-radius: 4px; }
 </style>
 </head>
@@ -149,13 +155,15 @@
     行は消さず、状態を「廃止」「取消」「重複」に変えて残します(後から経緯を追えるように)。</div>
   <div class="row">
     <div style="flex:4"><label>① 税理士のフィードバック</label>
-      <textarea id="fbText" style="height:120px;font-size:12px" placeholder="チャット・メール・レビューのコメントをそのまま貼り付け(画像だけのときは空でよい)"></textarea></div>
+      <textarea id="fbText" style="height:120px;font-size:12px" placeholder="チャット・メール・レビューのコメントをそのまま貼り付け(画像だけのときは空でよい)"></textarea>
+      <div class="drop" id="fbDrop">画像はここに Ctrl+V で貼り付け・ドラッグ、または <input type="file" id="fbFile" accept="image/*" multiple style="width:auto">(仕訳画面のスクリーンショット、赤ペンの写真など。最大6枚)</div>
+      <div class="thumbs" id="fbThumbs"></div></div>
     <div><label>出典</label><input type="text" id="fbSource" value="税理士FB">
       <div style="margin-top:6px"><input type="checkbox" id="fbImg"> <label for="fbImg" style="display:inline" title="スクリーンショット・写真は、Geminiにプロンプトを貼るときに同じメッセージへ添付します">画像あり</label></div>
       <div style="margin-top:8px"><button id="btnFbPrompt">① プロンプトをコピー</button></div>
       <div style="margin-top:6px"><a class="muted" href="https://gemini.google.com/app">Geminiを開く</a></div></div>
   </div>
-  <label>② Gemini(またはClaude)の回答(JSON)</label>
+  <label>② Gemini(またはClaude)の回答(JSON) <span class="muted" id="fbKeyHint"></span></label>
   <textarea id="fbResult" style="height:80px;font-size:12px" placeholder="返ってきたJSONを貼り付け"></textarea>
   <div style="margin-top:6px">
     <button id="btnFbPlan">② 変更内容を確認</button>
@@ -250,7 +258,7 @@
 <script>
   const $ = id => document.getElementById(id);
   const DEFAULT_LANG = '日本語';
-  const PANEL_VERSION = '2026-10-20c'; // Code.gs の CFG.VERSION と同じ値にする
+  const PANEL_VERSION = '2026-10-20d'; // Code.gs の CFG.VERSION と同じ値にする
   let clients = [], questions = [], tpl = null, sendInfo = null;
 
   function status(kind, text, links, actions) {
@@ -298,6 +306,9 @@
     if (!$('date').value) $('date').value = d.today;
     $('model').value = d.model; $('firmName').value = d.firmName;
     $('keyState').textContent = d.hasKey ? '(登録済)' : '(未登録)';
+    hasKey = d.hasKey;
+    $('fbKeyHint').textContent = hasKey ? '— APIキー登録済みなので、空のまま「② 変更内容を確認」を押せば、文章と画像をそのままGeminiに送って変更案を作ります'
+      : '— 設定タブでGemini APIキーを登録すると、①と②のコピー・貼り付けなしで、パネルに貼った画像ごと読ませられます';
     $('cwState').textContent = d.hasChatwork ? '(登録済)' : '(未登録)';
     $('tplState').textContent = d.hasTemplate ? '(登録済)' : '(未登録)';
     $('lwState').textContent = d.hasLineWorks ? '(登録済)' : '(未登録)';
@@ -325,7 +336,7 @@
     if ($('p-q').classList.contains('on')) loadQuestions();
     if ($('p-send').classList.contains('on')) loadSend();
     if ($('p-k').classList.contains('on')) loadIntakeTemplate();
-    fbPlan = null; renderFbPlan(); // 別の関与先の変更案を残さない
+    fbPlan = null; renderFbPlan(); clearFbImages(); // 別の関与先の変更案・画像を残さない
     if ($('p-fb').classList.contains('on')) loadFeedbackTemplate();
   }
 
@@ -788,7 +799,39 @@
   }
 
   /* ---------- 税理士のフィードバック ---------- */
-  let fbTpl = null, fbPlan = null;
+  let fbTpl = null, fbPlan = null, fbImages = [], hasKey = false;
+  // 貼った画像は長辺1600pxに縮めてJPEGにする(送る量を抑えつつ、帳簿の文字が読める大きさ)
+  function addFbImages(files) {
+    Array.from(files || []).filter(f => /^image\//.test(f.type)).forEach(f => {
+      if (fbImages.length >= 6) return fail('画像は1回に6枚までです');
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          const k = Math.min(1, 1600 / Math.max(img.width, img.height));
+          const cv = document.createElement('canvas'); cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k);
+          const g = cv.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height); g.drawImage(img, 0, 0, cv.width, cv.height);
+          const url = cv.toDataURL('image/jpeg', 0.9);
+          if (fbImages.length >= 6) return;
+          fbImages.push({ url: url, mimeType: 'image/jpeg', data: url.split(',')[1] });
+          $('fbImg').checked = true; renderFbImages();
+        };
+        img.onerror = () => fail('画像を読めませんでした: ' + (f.name || '貼り付けた画像'));
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(f);
+    });
+  }
+  function renderFbImages() {
+    const box = $('fbThumbs'); box.innerHTML = '';
+    fbImages.forEach((im, i) => {
+      const d = document.createElement('div'), img = document.createElement('img'), x = document.createElement('button');
+      img.src = im.url; x.className = 'sub'; x.textContent = '×'; x.title = 'この画像を外す';
+      x.onclick = () => { fbImages.splice(i, 1); renderFbImages(); };
+      d.appendChild(img); d.appendChild(x); box.appendChild(d);
+    });
+  }
+  function clearFbImages() { fbImages = []; $('fbFile').value = ''; renderFbImages(); }
   // 議事録と同じく、押した瞬間にコピーできるよう雛形を先読みしておく
   function loadFeedbackTemplate() {
     const name = $('client').value;
@@ -802,7 +845,7 @@
   function copyFeedbackPrompt() {
     const name = $('client').value, t = $('fbText').value.trim();
     if (!name) return fail('関与先を選択または登録してください');
-    const img = $('fbImg').checked;
+    const img = $('fbImg').checked || fbImages.length > 0;
     if (!img && t.length < 5) return fail('税理士のフィードバックを貼り付けてください(画像だけのときは「画像あり」にチェック)');
     if (!fbTpl || fbTpl.client !== name) return status('info', name + ' の情報を読み込み中です。数秒後にもう一度押してください');
     const s = fbTpl.template.replace('{{SOURCE}}', () => $('fbSource').value.trim() || '税理士FB');
@@ -810,7 +853,9 @@
     const text = s.slice(0, s.lastIndexOf('{{TEXT}}')) + (img ? '(このメッセージに画像を添付しています。画像の内容もフィードバックとして読んでください)\n' : '') + t;
     if (!copyText(text)) return fail('コピーできませんでした。もう一度押してください');
     status('ok', '「' + name + '」用のプロンプトをコピーしました。Gemini(またはClaude)に貼り付け' +
-      (img ? '、同じメッセージにスクリーンショット・写真を添付して' : '') + '送信し、返ってきたJSONを②に貼ってください\n',
+      (img ? '、同じメッセージにスクリーンショット・写真を添付して' : '') + '送信し、返ってきたJSONを②に貼ってください' +
+      (fbImages.length ? '\n※パネルに貼った画像は、この方法ではGeminiに渡りません。Geminiのメッセージにも添付してください' +
+        (hasKey ? '(②を空のまま「② 変更内容を確認」を押せば、画像ごと自動で送れます)' : '') : '') + '\n',
       [{ label: 'Geminiを開く', url: 'https://gemini.google.com/app' }]);
     $('fbResult').focus();
   }
@@ -818,17 +863,24 @@
   function reviewFeedback(dupOnly) {
     const name = $('client').value, res = $('fbResult').value.trim();
     if (!name) return fail('関与先を選択または登録してください');
-    if (!dupOnly && !res) return fail('②にGemini(またはClaude)の回答を貼り付けてください');
-    status('info', dupOnly ? '重複している質問を探しています' : '変更内容を確認しています');
-    call('planFeedback', [{ client: name, text: $('fbText').value.trim(), source: $('fbSource').value.trim(), resultJson: dupOnly ? '' : res, dupOnly: dupOnly }], r => {
+    const text = $('fbText').value.trim();
+    // ②が空で、APIキーがあれば、文章と画像をそのままGeminiに送る
+    const api = !dupOnly && !res;
+    if (api && !hasKey) return fail('②にGemini(またはClaude)の回答を貼り付けてください(設定タブでGemini APIキーを登録すれば、貼り付けなしで画像ごと送れます)');
+    if (api && text.length < 5 && !fbImages.length) return fail('税理士のフィードバック(文章か画像)を貼り付けてください');
+    status('info', dupOnly ? '重複している質問を探しています' : api ? 'Geminiに送って変更案を作っています' + (fbImages.length ? '(画像' + fbImages.length + '枚)' : '') + '。1分ほどかかることがあります' : '変更内容を確認しています');
+    call('planFeedback', [{ client: name, text: text, source: $('fbSource').value.trim(), resultJson: dupOnly ? '' : res, dupOnly: dupOnly,
+      images: dupOnly ? [] : fbImages.map(im => ({ mimeType: im.mimeType, data: im.data })) }], r => {
       if ($('client').value !== name) return;
       fbPlan = r; renderFbPlan();
+      if ((r.images || []).length) fbPlan.imageCount = r.images.length;
       const n = r.actions.length;
       status(r.warnings.length ? 'err' : 'ok',
         (n ? '変更案 ' + n + '件。内容を確認し、反映しないものはチェックを外して「③ チェックした変更を反映」を押してください。'
           : dupOnly ? '重複している質問は見つかりませんでした(文が同じものだけを探します。言い回しが違うものはAIの案で拾います)。' : '反映できる変更案はありませんでした。') +
         (r.warnings.length ? '\n反映できないもの(IDの誤り・既にあるものなど):\n・' + r.warnings.join('\n・') : '') +
-        (r.notes.length ? '\nAIのメモ(反映先が分からなかった指摘など。必要なら手で対応):\n・' + r.notes.join('\n・') : ''));
+        (r.notes.length ? '\nAIのメモ(反映先が分からなかった指摘など。必要なら手で対応):\n・' + r.notes.join('\n・') : '') +
+        ((r.images || []).length ? '\n画像を 社内用/税理士FB に保存しました\n' : ''), (r.images || []).map(im => ({ label: im.name, url: im.url })));
     });
   }
   function renderFbPlan() {
@@ -854,9 +906,10 @@
     if (!confirm('「' + fbPlan.client + '」に ' + acts.length + '件の変更を反映します。' +
       (firm ? '\n※共通ルールの変更は、全関与先の議事録・抽出のプロンプトに効きます。' : '') + '\n\nよろしいですか?')) return;
     status('info', '反映中です');
-    call('applyFeedback', [{ client: fbPlan.client, source: $('fbSource').value.trim(), actions: acts.map(a => ({ type: a.type, data: a.data })) }], r => {
+    call('applyFeedback', [{ client: fbPlan.client, source: $('fbSource').value.trim(), imageCount: fbPlan.imageCount || 0,
+      actions: acts.map(a => ({ type: a.type, data: a.data })) }], r => {
       fbPlan = null; renderFbPlan();
-      $('fbText').value = ''; $('fbResult').value = ''; $('fbImg').checked = false;
+      $('fbText').value = ''; $('fbResult').value = ''; $('fbImg').checked = false; clearFbImages();
       status(r.errors.length ? 'err' : 'ok', '反映しました: ' + (r.counts.join(' / ') || 'なし') +
         (r.errors.length ? '\n反映できなかったもの(案を作った後にシートが変わったなど):\n・' + r.errors.join('\n・') : '') + '\n',
         [{ label: 'カルテを開く', url: r.karteUrl }, { label: '質問票を開く', url: r.questionsUrl }, { label: 'タスクを開く', url: r.todosUrl },
@@ -917,6 +970,17 @@
   $('btnFbPlan').onclick = () => reviewFeedback(false);
   $('btnFbDup').onclick = () => reviewFeedback(true);
   $('btnFbApply').onclick = applyFeedbackPlan;
+  $('fbFile').onchange = () => { addFbImages($('fbFile').files); $('fbFile').value = ''; };
+  // 税理士FBタブを開いているときの Ctrl+V は、画像が含まれていれば画像として取り込む(文章はそのまま欄に入る)
+  document.addEventListener('paste', e => {
+    if (!$('p-fb').classList.contains('on')) return;
+    const files = Array.from((e.clipboardData && e.clipboardData.items) || []).filter(x => x.kind === 'file' && /^image\//.test(x.type)).map(x => x.getAsFile());
+    if (files.length) { e.preventDefault(); addFbImages(files); }
+  });
+  const drop = $('fbDrop');
+  drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+  drop.ondragleave = () => drop.classList.remove('over');
+  drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); addFbImages(e.dataTransfer.files); };
   $('btnFbAll').onclick = () => {
     if (!fbPlan) return;
     const on = fbPlan.actions.some(a => a.checked === false);
