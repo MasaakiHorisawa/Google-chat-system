@@ -61,6 +61,7 @@
   <div class="tab on" data-p="mtg">議事録作成</div>
   <div class="tab" data-p="q">質問票</div>
   <div class="tab" data-p="k">カルテ登録</div>
+  <div class="tab" data-p="fb">税理士FB</div>
   <div class="tab" data-p="tax">申告・納税</div>
   <div class="tab" data-p="send">送付</div>
   <div class="tab" data-p="set">設定</div>
@@ -140,6 +141,28 @@
     <div><label style="margin-top:0">出典</label><input type="text" id="kImportSrc" value="監査">
       <div style="margin-top:8px"><button id="btnKImport">貼り付けた内容を登録</button></div>
       <div style="margin-top:6px"><button class="sub" id="btnKSpec" title="監査をしているClaudeのチャットに貼ると、この欄にそのまま貼れるJSONで出力されます">Claudeへの指示文をコピー</button></div></div>
+  </div>
+</div>
+
+<div class="pane" id="p-fb">
+  <div class="muted" style="margin-top:6px">税理士のフィードバック(レビューの指摘・質問への回答・作業の指示)から、カルテのルール追加・修正、質問票の回答・重複の整理・取消、タスク、全関与先に効く共通ルールの変更案を作ります。案を確認してから反映します。
+    行は消さず、状態を「廃止」「取消」「重複」に変えて残します(後から経緯を追えるように)。</div>
+  <div class="row">
+    <div style="flex:4"><label>① 税理士のフィードバック</label>
+      <textarea id="fbText" style="height:120px;font-size:12px" placeholder="チャット・メール・レビューのコメントをそのまま貼り付け"></textarea></div>
+    <div><label>出典</label><input type="text" id="fbSource" value="税理士FB">
+      <div style="margin-top:8px"><button id="btnFbPrompt">① プロンプトをコピー</button></div>
+      <div style="margin-top:6px"><a class="muted" href="https://gemini.google.com/app">Geminiを開く</a></div></div>
+  </div>
+  <label>② Gemini(またはClaude)の回答(JSON)</label>
+  <textarea id="fbResult" style="height:80px;font-size:12px" placeholder="返ってきたJSONを貼り付け"></textarea>
+  <div style="margin-top:6px">
+    <button id="btnFbPlan">② 変更内容を確認</button>
+    <button class="sub" id="btnFbDup" title="AIを使わず、文が同じ未回答の質問を探して整理案を出します(回答済の質問があれば回答を写します)">重複している質問を探す</button>
+  </div>
+  <div id="fbPlanBox" style="display:none">
+    <div class="qlist"><table><thead><tr><th style="width:30px"></th><th style="width:150px">変更</th><th>内容</th></tr></thead><tbody id="fbBody"></tbody></table></div>
+    <div style="margin-top:8px"><button id="btnFbApply">③ チェックした変更を反映</button> <button class="sub" id="btnFbAll">すべて選択 / 解除</button></div>
   </div>
 </div>
 
@@ -226,7 +249,7 @@
 <script>
   const $ = id => document.getElementById(id);
   const DEFAULT_LANG = '日本語';
-  const PANEL_VERSION = '2026-10-16b'; // Code.gs の CFG.VERSION と同じ値にする
+  const PANEL_VERSION = '2026-10-20a'; // Code.gs の CFG.VERSION と同じ値にする
   let clients = [], questions = [], tpl = null, sendInfo = null;
 
   function status(kind, text, links, actions) {
@@ -301,6 +324,8 @@
     if ($('p-q').classList.contains('on')) loadQuestions();
     if ($('p-send').classList.contains('on')) loadSend();
     if ($('p-k').classList.contains('on')) loadIntakeTemplate();
+    fbPlan = null; renderFbPlan(); // 別の関与先の変更案を残さない
+    if ($('p-fb').classList.contains('on')) loadFeedbackTemplate();
   }
 
   const DEST_HINT = {
@@ -413,7 +438,8 @@
     questions = list;
     const body = $('qBody'); body.innerHTML = '';
     const all = $('showAll').checked;
-    list.filter(q => all || q.status !== '回答済').forEach(q => {
+    // 回答済と、税理士FBで取消・重複にした質問は「回答済も表示」のときだけ出す
+    list.filter(q => all || ['回答済', '取消', '重複'].indexOf(q.status) < 0).forEach(q => {
       const tr = document.createElement('tr');
       const td = t => { const x = document.createElement('td'); x.textContent = t; tr.appendChild(x); return x; };
       td(q.id); td(q.to || '関与先').style.whiteSpace = 'nowrap'; td(q.question + (q.reason ? '\n(' + q.reason + ')' : '')).style.whiteSpace = 'pre-wrap'; td(q.status);
@@ -713,8 +739,9 @@
       '- 下の「既にあるもの」と同じ論点は、言い回しが違っても出さない。',
       '- 該当が無い項目は空配列にする。',
       '',
-      '# 既にあるもの(出さない)',
-    ].concat(list('未回答の質問:', intakeTpl.questions || []))
+    ].concat((intakeTpl.firmRules || []).length ? ['# 事務所共通ルール(税理士の指示。従う)'].concat(intakeTpl.firmRules.map(x => '- ' + x), ['']) : [])
+      .concat(['# 既にあるもの(出さない)'])
+      .concat(list('未回答の質問:', intakeTpl.questions || []))
       .concat(['']).concat(list('カルテ:', intakeTpl.karte ? intakeTpl.karte.split('\n') : []))
       .concat(['']).concat(list('未完了のタスク:', intakeTpl.todos || []))
       .join('\n');
@@ -748,6 +775,81 @@
     });
   }
 
+  /* ---------- 税理士のフィードバック ---------- */
+  let fbTpl = null, fbPlan = null;
+  // 議事録と同じく、押した瞬間にコピーできるよう雛形を先読みしておく
+  function loadFeedbackTemplate() {
+    const name = $('client').value;
+    fbTpl = null;
+    if (!name) return;
+    google.script.run
+      .withFailureHandler(e => status('err', 'エラー: ' + (e && e.message ? e.message : e)))
+      .withSuccessHandler(r => { if (r.client === $('client').value) fbTpl = r; })
+      .getFeedbackTemplate(name);
+  }
+  function copyFeedbackPrompt() {
+    const name = $('client').value, t = $('fbText').value.trim();
+    if (!name) return fail('関与先を選択または登録してください');
+    if (t.length < 5) return fail('税理士のフィードバックを貼り付けてください');
+    if (!fbTpl || fbTpl.client !== name) return status('info', name + ' の情報を読み込み中です。数秒後にもう一度押してください');
+    const s = fbTpl.template.replace('{{SOURCE}}', () => $('fbSource').value.trim() || '税理士FB');
+    const text = s.slice(0, s.lastIndexOf('{{TEXT}}')) + t;
+    if (!copyText(text)) return fail('コピーできませんでした。もう一度押してください');
+    status('ok', '「' + name + '」用のプロンプトをコピーしました。Gemini(またはClaude)に貼り付けて送信し、返ってきたJSONを②に貼ってください\n',
+      [{ label: 'Geminiを開く', url: 'https://gemini.google.com/app' }]);
+    $('fbResult').focus();
+  }
+  // 変更案を作る(まだ書き込まない)。dupOnly はAIを使わず、文が同じ質問の重複だけを探す
+  function reviewFeedback(dupOnly) {
+    const name = $('client').value, res = $('fbResult').value.trim();
+    if (!name) return fail('関与先を選択または登録してください');
+    if (!dupOnly && !res) return fail('②にGemini(またはClaude)の回答を貼り付けてください');
+    status('info', dupOnly ? '重複している質問を探しています' : '変更内容を確認しています');
+    call('planFeedback', [{ client: name, text: $('fbText').value.trim(), source: $('fbSource').value.trim(), resultJson: dupOnly ? '' : res, dupOnly: dupOnly }], r => {
+      if ($('client').value !== name) return;
+      fbPlan = r; renderFbPlan();
+      const n = r.actions.length;
+      status(r.warnings.length ? 'err' : 'ok',
+        (n ? '変更案 ' + n + '件。内容を確認し、反映しないものはチェックを外して「③ チェックした変更を反映」を押してください。'
+          : dupOnly ? '重複している質問は見つかりませんでした(文が同じものだけを探します。言い回しが違うものはAIの案で拾います)。' : '反映できる変更案はありませんでした。') +
+        (r.warnings.length ? '\n反映できないもの(IDの誤り・既にあるものなど):\n・' + r.warnings.join('\n・') : '') +
+        (r.notes.length ? '\nAIのメモ(反映先が分からなかった指摘など。必要なら手で対応):\n・' + r.notes.join('\n・') : ''));
+    });
+  }
+  function renderFbPlan() {
+    const body = $('fbBody'); body.innerHTML = '';
+    const acts = fbPlan ? fbPlan.actions : [];
+    $('fbPlanBox').style.display = acts.length ? 'block' : 'none';
+    acts.forEach(a => {
+      const tr = document.createElement('tr');
+      const c = document.createElement('td'), cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.checked = a.checked !== false; cb.onchange = () => { a.checked = cb.checked; };
+      c.appendChild(cb); tr.appendChild(c);
+      const td = t => { const x = document.createElement('td'); x.textContent = t; x.style.whiteSpace = 'pre-wrap'; tr.appendChild(x); return x; };
+      td(a.label);
+      td(a.text + (a.data.reason ? '\n(理由: ' + a.data.reason + ')' : ''));
+      body.appendChild(tr);
+    });
+  }
+  function applyFeedbackPlan() {
+    if (!fbPlan || fbPlan.client !== $('client').value) return fail('先に「② 変更内容を確認」を押してください');
+    const acts = fbPlan.actions.filter(a => a.checked !== false);
+    if (!acts.length) return fail('反映する変更にチェックを入れてください');
+    const firm = acts.some(a => a.type.indexOf('firm_rule') === 0);
+    if (!confirm('「' + fbPlan.client + '」に ' + acts.length + '件の変更を反映します。' +
+      (firm ? '\n※共通ルールの変更は、全関与先の議事録・抽出のプロンプトに効きます。' : '') + '\n\nよろしいですか?')) return;
+    status('info', '反映中です');
+    call('applyFeedback', [{ client: fbPlan.client, source: $('fbSource').value.trim(), actions: acts.map(a => ({ type: a.type, data: a.data })) }], r => {
+      fbPlan = null; renderFbPlan();
+      $('fbText').value = ''; $('fbResult').value = '';
+      status(r.errors.length ? 'err' : 'ok', '反映しました: ' + (r.counts.join(' / ') || 'なし') +
+        (r.errors.length ? '\n反映できなかったもの(案を作った後にシートが変わったなど):\n・' + r.errors.join('\n・') : '') + '\n',
+        [{ label: 'カルテを開く', url: r.karteUrl }, { label: '質問票を開く', url: r.questionsUrl }, { label: 'タスクを開く', url: r.todosUrl },
+          { label: '共通ルールを開く', url: r.rulesUrl }]);
+      loadTemplate(); loadIntakeTemplate(); loadFeedbackTemplate(); // カルテ・質問票・共通ルールが変わったので雛形を取り直す
+    });
+  }
+
   // 回答JSONの先方用部分が日本語かどうか(ひらがな・カタカナの割合で判定。Code.gs の ensureClientDocLang_ と同じ基準)。判定できなければ null
   function clientDocIsJapanese(raw) {
     try {
@@ -770,6 +872,7 @@
     if (t.dataset.p === 'q') loadQuestions();
     if (t.dataset.p === 'send') loadSend();
     if (t.dataset.p === 'k') loadIntakeTemplate();
+    if (t.dataset.p === 'fb') loadFeedbackTemplate();
   });
   $('client').onchange = onClientChange;
   $('showAll').onchange = () => renderQuestions(questions);
@@ -795,6 +898,15 @@
   $('btnKImport').onclick = runImport;
   $('btnKSpec').onclick = copyImportSpec;
   $('btnKRules').onclick = copyClientRules;
+  $('btnFbPrompt').onclick = copyFeedbackPrompt;
+  $('btnFbPlan').onclick = () => reviewFeedback(false);
+  $('btnFbDup').onclick = () => reviewFeedback(true);
+  $('btnFbApply').onclick = applyFeedbackPlan;
+  $('btnFbAll').onclick = () => {
+    if (!fbPlan) return;
+    const on = fbPlan.actions.some(a => a.checked === false);
+    fbPlan.actions.forEach(a => { a.checked = on; }); renderFbPlan();
+  };
   $('btnSend').onclick = send;
   $('btnSendInt').onclick = sendInternal;
   $('sMtg').onchange = () => { clearAttach(); fillMessage(); };
