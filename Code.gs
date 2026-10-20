@@ -16,7 +16,7 @@
 const CFG = {
   // Code.gs と Panel.html は必ず同じ版を入れる。片方だけ古いと、言語の指定などが黙って効かなくなるため、版が違えば止める
   // 修正を配るたびに、Panel.html の PANEL_VERSION と一緒に上げる
-  VERSION: '2026-10-20d',
+  VERSION: '2026-10-20e',
   MASTER_SHEET: '関与先マスタ',
   RULES_SHEET: '共通ルール', // 全関与先に効く処理ルール(税理士のフィードバックから追加)。マスターSSに置く
   SHEET_KARTE: '関与先カルテ',
@@ -1764,9 +1764,9 @@ function addNextMeeting_(client, nm, meetingDate) {
 function appendKarte_(ss, items, date, source, status) {
   if (!items.length) return 0;
   const sh = ss.getSheetByName(CFG.SHEET_KARTE);
-  const start = sh.getLastRow();
+  const start = sh.getLastRow(), base = idNum_(sh, 'K');
   const rows = items.map((k, i) => [
-    'K' + pad_(start + i), // 既存行は上書きしない。AI抽出分は必ず「未確認」で追記し、人が確認済にする
+    'K' + pad_(base + 1 + i), // 既存行は上書きしない。AI抽出分は必ず「未確認」で追記し、人が確認済にする
     CFG.KARTE_CATEGORIES.indexOf(k.category) >= 0 ? k.category : 'その他',
     s_(k.item), s_(k.content), source || 'MTG ' + date, status || '未確認', date,
   ]);
@@ -1777,10 +1777,10 @@ function appendKarte_(ss, items, date, source, status) {
 function appendTodos_(ss, todos, date) {
   if (!todos.length) return 0;
   const sh = ss.getSheetByName(CFG.SHEET_TODO);
-  const start = sh.getLastRow();
+  const start = sh.getLastRow(), base = idNum_(sh, 'T');
   const now = new Date();
   const rows = todos.map((t, i) => [
-    'T' + pad_(start + i), date, t.owner === '関与先' ? '関与先' : '事務所',
+    'T' + pad_(base + 1 + i), date, t.owner === '関与先' ? '関与先' : '事務所',
     s_(t.assignee), s_(t.task), s_(t.due), CFG.TODO_STATUSES[0], now, '登録',
   ]);
   sh.getRange(start + 1, 1, rows.length, rows[0].length).setValues(rows);
@@ -1800,9 +1800,9 @@ function applyQuestions_(ss, r, date, openQs, source) {
     sh.getRange(row, 5, 1, 4).setValues([['回答済(AI抽出・要確認)', s_(a.answer), date, source]]);
     answered++;
   });
-  const start = sh.getLastRow();
+  const start = sh.getLastRow(), base = idNum_(sh, 'Q');
   const rows = r.new_questions.map((q, i) => [
-    'Q' + pad_(start + i), date, s_(q.question), s_(q.reason), '未回答', '', '', source, questionTo_(q.to),
+    'Q' + pad_(base + 1 + i), date, s_(q.question), s_(q.reason), '未回答', '', '', source, questionTo_(q.to),
   ]);
   if (rows.length) sh.getRange(start + 1, 1, rows.length, rows[0].length).setValues(rows);
   return { added: rows.length, answered: answered };
@@ -2089,6 +2089,10 @@ function ensureNotebook_(ss) {
       SpreadsheetApp.newDataValidation().requireValueInList(values, true).setAllowInvalid(false).build());
   };
   dropdown(ss.getSheetByName(CFG.SHEET_KARTE), 6, ['未確認', '確認済', '廃止']);
+  // 旧版で重なってしまったIDを直す(IDで行を探す処理が別の行に書き込まないように)
+  fixDuplicateIds_(ss.getSheetByName(CFG.SHEET_KARTE), 'K');
+  fixDuplicateIds_(ss.getSheetByName(CFG.SHEET_TODO), 'T');
+  fixDuplicateIds_(ss.getSheetByName(CFG.SHEET_Q), 'Q');
   const todo = ss.getSheetByName(CFG.SHEET_TODO);
   dropdown(todo, 7, CFG.TODO_STATUSES);
   // 質問票のI列「宛先」。旧版のノートには見出しとプルダウンを足す(既存の行は空欄 = 関与先のまま)
@@ -2138,7 +2142,35 @@ function findRowById_(sh, id) {
   return i < 0 ? 0 : i + 2;
 }
 
-function nextId_(sh, prefix) { return prefix + pad_(sh.getLastRow()); }
+/**
+ * IDは「今ある最大の番号 + 1」で振る(行数から振ると、行を消したあとに既存のIDと重なるため)
+ */
+function nextId_(sh, prefix) { return prefix + pad_(idNum_(sh, prefix) + 1); }
+function idNum_(sh, prefix) {
+  if (sh.getLastRow() < 2) return 0;
+  const re = new RegExp('^' + prefix + '(\\d+)$');
+  return sh.getRange(2, 1, sh.getLastRow() - 1, 1).getDisplayValues()
+    .reduce((m, v) => { const x = String(v[0]).trim().match(re); return x ? Math.max(m, Number(x[1])) : m; }, 0);
+}
+
+/**
+ * 同じIDが2行以上あれば、2行目以降に新しいIDを振り直す(旧版で行を消したときに重なった分の修復)。
+ * 同じIDのままだと、回答や税理士FBの反映が別の行に書き込まれてしまう。振り直した行のセルにはメモで元のIDを残す
+ */
+function fixDuplicateIds_(sh, prefix) {
+  if (sh.getLastRow() < 2) return [];
+  const ids = sh.getRange(2, 1, sh.getLastRow() - 1, 1).getDisplayValues().map(v => String(v[0]).trim());
+  let max = idNum_(sh, prefix);
+  const seen = {}, changed = [];
+  ids.forEach((id, i) => {
+    if (!id) return;
+    if (!seen[id]) { seen[id] = true; return; }
+    const neu = prefix + pad_(++max);
+    sh.getRange(i + 2, 1).setValue(neu).setNote('IDの重複を解消するため振り直し(元: ' + id + ')');
+    changed.push(id + '→' + neu);
+  });
+  return changed;
+}
 function pad_(n) { return ('000' + n).slice(-4); }
 function firmName_() { return PropertiesService.getScriptProperties().getProperty('FIRM_NAME') || ''; }
 
