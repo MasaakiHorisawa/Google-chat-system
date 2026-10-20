@@ -16,9 +16,16 @@
 const CFG = {
   // Code.gs と Panel.html は必ず同じ版を入れる。片方だけ古いと、言語の指定などが黙って効かなくなるため、版が違えば止める
   // 修正を配るたびに、Panel.html の PANEL_VERSION と一緒に上げる
-  VERSION: '2026-10-20e',
+  VERSION: '2026-10-21a',
   MASTER_SHEET: '関与先マスタ',
   RULES_SHEET: '共通ルール', // 全関与先に効く処理ルール(税理士のフィードバックから追加)。マスターSSに置く
+  RULE_SCENES: ['常時', '決算', '月次'], // 共通ルールF列「使う場面」。決算 のルールは決算タスクにチェック項目として入る
+  CLOSING_SHEET: '決算タスク雛形', // 決算タスクを作るときの元。マスターSSに置き、事務所で編集する
+  DASHBOARD_SHEET: '全関与先タスク', // 全関与先の未完了タスクと未回答の質問(「全関与先の一覧を更新」で作り直す)
+  PROGRESS_SHEET: '決算進捗',
+  FISCAL_EXTENSIONS: ['なし', '1か月', '2か月'], // 関与先マスタS列「申告期限の延長」
+  CTAX_TYPES: ['課税(本則)', '簡易課税', '2割特例', '免税'], // 関与先マスタT列「消費税」
+  STALE_TASK_DAYS: 180, // これより古い未完了タスクは「要確認」に出す
   SHEET_KARTE: '関与先カルテ',
   SHEET_MTG: 'MTG一覧',
   SHEET_TODO: 'タスク',
@@ -31,15 +38,20 @@ const CFG = {
   DEFAULT_MODEL: 'gemini-3.8-flash',
   KARTE_CATEGORIES: ['基本情報', '仕訳ルール', '勘定科目', '仕入先・取引先', '資料の受け渡し', '注意点', '税務論点', 'その他'],
   HEADERS: {
-    MASTER: ['関与先名', '敬称', 'MFコード', 'スプレッドシートID', 'URL', 'フォルダID', '最終MTG日', '送付方法', '送付先', '先方共有フォルダ', '先方言語', '内部報告先', '次回MTG日', 'MTG前確認の自動送付', 'MTG前確認 送付済', 'MTG前確認メモ', '区分'],
+    MASTER: ['関与先名', '敬称', 'MFコード', 'スプレッドシートID', 'URL', 'フォルダID', '最終MTG日', '送付方法', '送付先', '先方共有フォルダ', '先方言語', '内部報告先', '次回MTG日', 'MTG前確認の自動送付', 'MTG前確認 送付済', 'MTG前確認メモ', '区分', '決算月', '申告期限の延長', '消費税'],
     KARTE: ['ID', 'カテゴリ', '項目', '内容', '出典', '状態', '更新日'],
     MTG: ['日付', 'タイトル', '参加者', '要約', '議事録Doc', '先方用Doc', '先方用PDF', 'シート名', '送付', '先方言語'],
-    TODO: ['ID', 'MTG日', '担当区分', '担当者', 'タスク', '期限', '状態', '最終アップデート', '更新内容'],
+    TODO: ['ID', 'MTG日', '担当区分', '担当者', 'タスク', '期限', '状態', '最終アップデート', '更新内容', '関連質問', '分類'],
     Q: ['ID', '起票日', '質問', '背景・理由', '状態', '回答', '回答日', '出典', '宛先'],
-    RULES: ['ID', 'ルール', '出典', '状態', '更新日'],
+    RULES: ['ID', 'ルール', '出典', '状態', '更新日', '使う場面'],
+    // 種類: タスク/質問。基準: 決算日/申告期限 からの日数(マイナスは前)。対象: 法人/個人/共通。条件: 空 か 消費税あり。
+    // 関連: タスクが回答を待つ質問の雛形ID(その質問に回答が入るまで「回答待ち」)
+    CLOSING: ['ID', '種類', '内容', '担当区分', '宛先', '基準', '日数', '対象', '条件', '関連', '状態', '出典'],
   },
   MAX_KARTE_CHARS: 20000,
-  TODO_STATUSES: ['未着手', '進行中', '対応済'],
+  // 最後が完了の状態(done の判定に使う)。回答待ち = 関連質問に回答が入るまで手を付けられないタスク
+  TODO_STATUSES: ['未着手', '進行中', '回答待ち', '対応済'],
+  TODO_WAITING: '回答待ち',
   SEND_METHODS: ['メール', 'Chatwork', 'Google Chat', 'LINE WORKS', '共有フォルダのみ'],
   // 関与先マスタN列のプルダウン。「有効」の関与先だけ、MTGの前営業日にMTG前確認を自動送付する(空欄は無効扱い)
   AUTO_BRIEF: ['有効', '無効'],
@@ -63,6 +75,7 @@ const CFG = {
     question_answer: '質問に回答', question_duplicate: '重複質問の整理', question_cancel: '質問の取消', question_add: '質問追加',
     todo_update: 'タスク更新', todo_add: 'タスク追加',
     firm_rule_retire: '共通ルール廃止(全関与先)', firm_rule_add: '共通ルール追加(全関与先)',
+    template_add: '決算雛形に追加(全関与先)',
   },
   // 質問票の未回答分を、メールやチャットに貼って送るときの文面。日本語と英語は固定、他の言語は日本語から訳す
   QUESTION_MSG: {
@@ -124,6 +137,8 @@ function onOpen() {
     .addSeparator()
     .addItem('MTG前確認の自動送付を開始', 'enableDailyBriefs')
     .addItem('MTG前確認の自動送付を停止', 'disableDailyBriefs')
+    .addSeparator()
+    .addItem('全関与先のタスク一覧を更新', 'refreshDashboardMenu')
     .addToUi();
 }
 
@@ -160,6 +175,7 @@ function getInitData() {
     hasTemplate: !!p.getProperty('NOTEBOOK_TEMPLATE_ID'),
     hasInternalChat: !!p.getProperty('INTERNAL_CHAT_WEBHOOK'),
     hasLineWorks: !!(p.getProperty('LW_CLIENT_ID') && p.getProperty('LW_PRIVATE_KEY') && p.getProperty('LW_BOT_ID')),
+    hasDashboard: !!p.getProperty('DASHBOARD_ID'),
   };
 }
 
@@ -189,13 +205,18 @@ function saveSettings(s) {
   set('LW_SERVICE_ACCOUNT', s.lwServiceAccount);
   set('LW_BOT_ID', s.lwBotId);
   set('LW_PRIVATE_KEY', s.lwKey);
+  if (s.dashboardUrl && String(s.dashboardUrl).trim()) {
+    const dId = idFromUrl_(s.dashboardUrl);
+    if (!dId) throw new Error('ダッシュボードのURLが正しくありません');
+    p.setProperty('DASHBOARD_ID', dId);
+  }
   if (s.internalHook && String(s.internalHook).trim()) {
     set('INTERNAL_CHAT_WEBHOOK', chatDest_(s.internalHook, '設定タブの内部報告用Google Chat'));
   }
   return getInitData();
 }
 
-function addClient(name, honorific, code, kind) {
+function addClient(name, honorific, code, kind, fyMonth) {
   name = String(name || '').trim();
   if (!name) throw new Error('関与先名を入力してください');
   if (listClients_().some(c => c.name === name)) throw new Error('同名の関与先が既にあります: ' + name);
@@ -218,6 +239,7 @@ function addClient(name, honorific, code, kind) {
   const master = getMasterSheet_();
   master.appendRow([s_(name), honorific || '様', s_(code || ''), ss.getId(), ss.getUrl(), folder.getId(), '']);
   if (CFG.CLIENT_KINDS.indexOf(kind) >= 0) master.getRange(master.getLastRow(), 17).setValue(kind);
+  if (Number(fyMonth) >= 1 && Number(fyMonth) <= 12) master.getRange(master.getLastRow(), 18).setValue(String(Number(fyMonth)));
   return getInitData();
 }
 
@@ -641,7 +663,7 @@ function feedbackState_(ss) {
   const todos = read(CFG.SHEET_TODO, 9).map(v => ({ id: v[0], owner: v[2], assignee: v[3], task: v[4], due: v[5], status: v[6] || CFG.TODO_STATUSES[0] }));
   const questions = readQuestions_(ss);
   const rules = readFirmRules_(true);
-  return { karte: karte, questions: questions, todos: todos, rules: rules, k: byId(karte), q: byId(questions), t: byId(todos), r: byId(rules) };
+  return { karte: karte, questions: questions, todos: todos, rules: rules, closing: readClosingTemplate_(), k: byId(karte), q: byId(questions), t: byId(todos), r: byId(rules) };
 }
 
 /** 回答済(AI抽出・要確認 を含む)か */
@@ -714,8 +736,10 @@ function fbCheck_(st, type, d) {
     const same = st.todos.filter(x => x.status !== done && normText_(x.task) === normText_(task))[0];
     if (same) return bad('同じタスクが既にあります(' + same.id + ')');
     const owner = str(d.owner) === '関与先' ? '関与先' : '事務所';
-    const data = { owner: owner, assignee: str(d.assignee), task: task, due: ymd_(d.due), reason: reason };
-    return { data: data, text: '[' + owner + '] ' + (data.assignee ? data.assignee + ': ' : '') + task + (data.due ? '(期限 ' + data.due + ')' : '') };
+    const related = relatedIds_(d.related).filter(x => st.q[x]).join(',');
+    const data = { owner: owner, assignee: str(d.assignee), task: task, due: ymd_(d.due), related: related, reason: reason };
+    return { data: data, text: '[' + owner + '] ' + (data.assignee ? data.assignee + ': ' : '') + task + (data.due ? '(期限 ' + data.due + ')' : '') +
+      (related ? '(' + related + ' の回答待ち)' : '') };
   }
   if (type === 'todo_update') {
     if (!t) return bad('タスクにありません');
@@ -730,7 +754,22 @@ function fbCheck_(st, type, d) {
     if (!rule) return bad('ルールが空です');
     const same = st.rules.filter(x => x.status !== '廃止' && normText_(x.rule) === normText_(rule))[0];
     if (same) return bad('同じ共通ルールが既にあります(' + same.id + ')');
-    return { data: { rule: rule, reason: reason }, text: rule };
+    const scene = CFG.RULE_SCENES.indexOf(str(d.scene)) >= 0 ? str(d.scene) : CFG.RULE_SCENES[0];
+    return { data: { rule: rule, scene: scene, reason: reason }, text: '[' + scene + '] ' + rule };
+  }
+  if (type === 'template_add') {
+    const text = str(d.text);
+    if (!text) return bad('内容が空です');
+    const same = st.closing.filter(x => x.status !== '廃止' && normText_(x.text) === normText_(text))[0];
+    if (same) return bad('同じ雛形が既にあります(' + same.id + ')');
+    const kind = str(d.kind) === '質問' ? '質問' : 'タスク';
+    const base = str(d.base) === '決算日' ? '決算日' : '申告期限';
+    const days = isFinite(Number(d.days)) && str(d.days) !== '' ? Math.round(Number(d.days)) : (base === '決算日' ? 14 : -14);
+    const target = CFG.CLIENT_KINDS.indexOf(str(d.target)) >= 0 ? str(d.target) : '共通';
+    const data = { kind: kind, text: text, owner: str(d.owner) === '関与先' ? '関与先' : '事務所',
+      to: str(d.to) === CFG.QUESTION_TO[1] ? CFG.QUESTION_TO[1] : CFG.QUESTION_TO[0], base: base, days: days, target: target,
+      condition: str(d.condition) === '消費税あり' ? '消費税あり' : '', reason: reason };
+    return { data: data, text: '[' + kind + '/' + target + '] ' + text + '(' + base + (days >= 0 ? '+' : '') + days + '日' + (data.condition ? '・' + data.condition : '') + ')' };
   }
   if (type === 'firm_rule_retire') {
     if (!r || r.status === '廃止') return bad('共通ルールに無いか、廃止済みです');
@@ -789,12 +828,18 @@ function fbApply_(ss, st, client, type, d, today, source) {
   }
   if (type === 'firm_rule_add') {
     const sh = getRulesSheet_();
-    sh.appendRow([nextId_(sh, 'R'), s_(d.rule), s_(client.name + ' / ' + source + why), '有効', today]);
+    sh.appendRow([nextId_(sh, 'R'), s_(d.rule), s_(client.name + ' / ' + source + why), '有効', today, d.scene]);
     st.rules.push({ rule: d.rule, status: '有効' });
   }
   if (type === 'firm_rule_retire') {
     setCells(getRulesSheet_(), d.id, 4, ['廃止', today]);
     st.r[d.id].status = '廃止';
+  }
+  if (type === 'template_add') {
+    const sh = getClosingSheet_();
+    sh.appendRow([nextId_(sh, 'D'), d.kind, s_(d.text), d.owner, d.kind === '質問' ? d.to : '', d.base, d.days, d.target, d.condition, '', '有効',
+      s_(client.name + ' / ' + source + why)]);
+    st.closing.push({ text: d.text, status: '有効' });
   }
 }
 
@@ -827,7 +872,7 @@ function buildFeedbackPrompt_(client, st, source, text) {
     .map(q => q.id + ' [' + q.to + '] ' + q.status + ': ' + one(q.question) + (q.answer ? ' / 回答: ' + one(q.answer) : ''));
   const todos = st.todos.filter(t => t.task && t.status !== done)
     .map(t => t.id + ' [' + t.owner + '] ' + t.status + ': ' + one(t.task) + (t.due ? '(期限 ' + t.due + ')' : ''));
-  const rules = st.rules.filter(r => r.status !== '廃止').map(r => r.id + ': ' + one(r.rule));
+  const rules = st.rules.filter(r => r.status !== '廃止').map(r => r.id + ' [' + r.scene + ']: ' + one(r.rule));
   const list = items => (items.length ? items.join('\n') : '(なし)');
   return [
     'あなたは日本の税理士事務所の職員です。税理士(所長・レビュー担当)からのフィードバックを読み、関与先ノート(カルテ・質問票・タスク)と事務所共通ルールへの変更案を作ります。変更案は職員が確認してから反映します。',
@@ -852,10 +897,11 @@ function buildFeedbackPrompt_(client, st, source, text) {
     '  "question_duplicate": [{"id": "整理する方の質問ID(未回答のもの)", "same_as": "残す方の質問ID", "reason": "同じと判断した理由"}],',
     '  "question_cancel": [{"id": "聞かなくてよいとされた未回答の質問ID", "reason": "理由"}],',
     '  "question_add": [{"to": "' + CFG.QUESTION_TO.join('|') + '", "question": "新たに確認すること", "reason": "なぜ必要か"}],',
-    '  "todo_add": [{"owner": "事務所|関与先", "assignee": "担当者名または空", "task": "やること", "due": "YYYY-MM-DDまたは空", "reason": "理由"}],',
+    '  "todo_add": [{"owner": "事務所|関与先", "assignee": "担当者名または空", "task": "やること", "due": "YYYY-MM-DDまたは空", "related": "回答を待つ質問のIDまたは空", "reason": "理由"}],',
     '  "todo_update": [{"id": "タスクID", "status": "' + CFG.TODO_STATUSES.join('|') + '", "note": "更新内容"}],',
-    '  "firm_rule_add": [{"rule": "全関与先に共通するルール", "reason": "理由"}],',
+    '  "firm_rule_add": [{"rule": "全関与先に共通するルール", "scene": "' + CFG.RULE_SCENES.join('|') + '", "reason": "理由"}],',
     '  "firm_rule_retire": [{"id": "共通ルールのID", "reason": "理由"}],',
+    '  "template_add": [{"kind": "タスク|質問", "text": "決算のたびに行う作業・聞く質問", "owner": "事務所|関与先", "to": "関与先|事務所内(質問のとき)", "base": "決算日|申告期限", "days": -14, "target": "法人|個人|共通", "condition": "空または 消費税あり", "reason": "理由"}],',
     '  "notes": ["反映先が分からなかった指摘、判断に迷った点"]',
     '}',
     '',
@@ -868,7 +914,10 @@ function buildFeedbackPrompt_(client, st, source, text) {
     '- 新たに関与先へ聞くこと・事務所で確認すること → question_add(関与先に見せるべきでない論点は「事務所内」)。',
     '- 事務所でやる作業の指示(仕訳の修正など) → todo_add。既存タスクの完了・状況の変更 → todo_update。',
     '- どの関与先にも当てはまる方針や、議事録・抽出の作り方への指摘(例: 「交際費は必ず税理士確認を付ける」「外注費は源泉の要否を確認する」) → firm_rule_add。関与先固有のことは入れない。',
+    '  scene は、いつも守る方針なら「常時」、決算のときに確認する点なら「決算」、毎月の記帳で確認する点なら「月次」。',
+    '- どの関与先でも決算のたびに行うべき作業・聞くべき質問(手順の抜けの指摘など) → template_add(決算タスク雛形に追加)。下の雛形に同じものがあれば出さない。base と days は「決算日の何日後」「申告期限の何日前(マイナス)」で表す。',
     '',
+    ...todoQuestionRules_(),
     '# 重複の整理(フィードバックで触れられていなくても行う)',
     '- 下の質問票で、同じことを聞いている質問が複数あれば question_duplicate に入れる。言い回しが違っても論点が同じなら重複。',
     '- same_as には回答済の方を選ぶ(回答がそのまま写る)。どちらも未回答なら古い方(番号の小さい方)を残す。宛先(関与先/事務所内)が違うものは重複にしない。',
@@ -880,6 +929,9 @@ function buildFeedbackPrompt_(client, st, source, text) {
     '',
     '# 事務所共通ルール(全関与先)',
     list(rules),
+    '',
+    '# 決算タスク雛形(全関与先。ID [種類] 内容)',
+    list(st.closing.filter(c => c.status !== '廃止').map(c => c.id + ' [' + c.type + '] ' + one(c.text))),
     '',
     '# カルテ(ID [カテゴリ] 項目: 内容(状態))',
     karte || '(なし)',
@@ -1227,7 +1279,7 @@ function buildPrompt_(client, date, attendees, transcript, karteText, openQs, la
     '  "summary": "内部用サマリー(300字程度)",',
     '  "decisions": ["決定事項"],',
     '  "important_points": ["重要事項・リスク・期限など"],',
-    '  "todos": [{"owner": "事務所|関与先", "assignee": "担当者名または空", "task": "やること", "due": "YYYY-MM-DDまたは空"}],',
+    '  "todos": [{"owner": "事務所|関与先", "assignee": "担当者名または空", "task": "やること", "due": "YYYY-MM-DDまたは空", "related": "回答を待たないと進められないときだけ、その質問票のID(例 Q0003)。無ければ空"}],',
     '  "knowledge": [{"category": "' + CFG.KARTE_CATEGORIES.join('|') + '", "item": "項目名", "content": "担当外の職員が読んで作業できる具体的な内容"}],',
     '  "new_questions": [{"to": "' + CFG.QUESTION_TO.join('|') + '", "question": "確認すべきこと(日本語)", "reason": "なぜ必要か", "question_client": "to が関与先のときだけ、同じ質問の先方言語訳。事務所内なら空文字"}],',
     '  "answered_questions": [{"id": "質問ID", "answer": "会議内で得られた回答"}],',
@@ -1242,8 +1294,9 @@ function buildPrompt_(client, date, attendees, transcript, karteText, openQs, la
     '  }',
     '}',
     '',
+    ...todoQuestionRules_(),
     '# new_questions の書き方',
-    '- to は「関与先」か「事務所内」。関与先に聞かないと分からないこと(事実・資料・意向)は「関与先」。',
+    '- to は「関与先」か「事務所内」。関与先に聞かないと分からないこと(事実・意向)は「関与先」。',
     '- 税理士に判断を仰ぐこと、事務所内で調べる・確認すること、関与先に見せるべきでない論点は「事務所内」。迷ったら「事務所内」にする。',
     '- 「事務所内」の質問は先方用の文書に載らない。client_doc にも書かない。',
     '',
@@ -1297,8 +1350,11 @@ function buildIntakePrompt_(client, source, text, karteText, openQs) {
     '{',
     '  "knowledge": [{"category": "' + CFG.KARTE_CATEGORIES.join('|') + '", "item": "項目名", "content": "担当外の職員が読んで作業できる具体的な内容"}],',
     '  "answered_questions": [{"id": "質問ID", "answer": "文面から得られた回答"}],',
-    '  "new_questions": [{"to": "' + CFG.QUESTION_TO.join('|') + '", "question": "追加で確認すべきこと", "reason": "なぜ必要か"}]',
+    '  "new_questions": [{"to": "' + CFG.QUESTION_TO.join('|') + '", "question": "追加で確認すべきこと", "reason": "なぜ必要か"}],',
+    '  "todos": [{"owner": "事務所|関与先", "assignee": "担当者名または空", "task": "やること", "due": "YYYY-MM-DDまたは空", "related": "回答を待つ質問票のIDまたは空"}]',
     '}',
+    '',
+    ...todoQuestionRules_(),
     '',
     '# knowledge の書き方',
     '- 今後この関与先を別の職員が担当しても作業できるための情報だけを書く。挨拶や日程調整などは書かない。',
@@ -1558,6 +1614,8 @@ function runDailyBriefs() {
     }
     master.getRange(c.row, 15).setValue(mark);
   });
+  // 自動送付のついでに、全関与先のタスク一覧も作り直す(送信はしない)
+  try { refreshDashboard(); } catch (e) { console.error('全関与先のタスク一覧の更新に失敗: ' + e.message); }
 }
 
 /** セルの表示値(2026-10-20 でも 2026/10/20 でも)を yyyy-MM-dd に揃える。日付でなければ空文字 */
@@ -1723,6 +1781,322 @@ function createTaxNotice(req) {
   return { docUrl: doc.getUrl(), pdfUrl: pdf.getUrl(), total: total, counts: { todos: tCount, knowledge: kCount, payments: pay.length } };
 }
 
+/* ===================== やること一覧・決算タスク ===================== */
+
+/** タスクシートを読む(J列 関連質問・K列 分類まで) */
+function readTodos_(ss) {
+  const sh = ss.getSheetByName(CFG.SHEET_TODO);
+  if (sh.getLastRow() < 2) return [];
+  return sh.getRange(2, 1, sh.getLastRow() - 1, 11).getDisplayValues().filter(v => v[0] && v[4])
+    .map(v => ({ id: v[0], date: v[1], owner: v[2] || '事務所', assignee: v[3], task: v[4], due: ymd_(v[5]) || v[5],
+      status: v[6] || CFG.TODO_STATUSES[0], updated: v[7], note: v[8], related: v[9], category: v[10] }));
+}
+
+/** 日付(yyyy-MM-dd)から今日までの日数。日付でなければ null */
+function daysSince_(d, today) {
+  const x = ymd_(d);
+  return x ? Math.round((Date.parse(today) - Date.parse(x)) / 86400000) : null;
+}
+
+/**
+ * やること一覧タブの中身。期限切れ・着手できる・回答待ち・関与先にお願い中のタスク、未回答の質問、
+ * データの「要確認」(回答済なのに回答が空、古い未完了タスク、宛先が空の質問)、決算の進み具合をまとめて返す
+ */
+function getTodoBoard(clientName) {
+  const client = findClient_(clientName);
+  const ss = openNotebook_(client);
+  const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  const done = CFG.TODO_STATUSES[CFG.TODO_STATUSES.length - 1];
+  const qs = readQuestions_(ss);
+  const tasks = readTodos_(ss);
+  const qById = qs.reduce((o, q) => { o[q.id] = q; return o; }, {});
+  const byDue = (a, b) => ((ymd_(a.due) || '9999') < (ymd_(b.due) || '9999') ? -1 : (ymd_(a.due) || '9999') > (ymd_(b.due) || '9999') ? 1 : 0);
+  const open = tasks.filter(t => t.status !== done).sort(byDue);
+  const isOver = t => ymd_(t.due) && ymd_(t.due) < today;
+  const withWait = t => Object.assign({}, t, { waitFor: relatedIds_(t.related).map(id => qById[id]
+    ? id + '(' + qById[id].status + '・起票から' + daysSince_(qById[id].date, today) + '日)' : id + '(質問票にありません)') });
+  const qItem = q => ({ id: q.id, text: q.question, days: daysSince_(q.date, today), to: q.to });
+  const checks = []
+    .concat(qs.filter(q => isAnsweredQ_(q) && !String(q.answer).trim()).map(q => ({ id: q.id, text: '回答済なのに回答欄が空: ' + q.question })))
+    .concat(open.filter(t => daysSince_(t.date, today) > CFG.STALE_TASK_DAYS)
+      .map(t => ({ id: t.id, text: '起票から' + daysSince_(t.date, today) + '日たった未完了のタスク(完了か持ち越しか確認): ' + t.task })))
+    .concat(qs.filter(q => q.status === '未回答' && !String(q.toRaw).trim()).map(q => ({ id: q.id, text: '宛先が空(関与先として扱っています): ' + q.question })))
+    .concat(open.filter(t => t.status === CFG.TODO_WAITING && !relatedIds_(t.related).length)
+      .map(t => ({ id: t.id, text: '回答待ちなのに関連質問が空(J列にQ番号を入れる): ' + t.task })));
+  return {
+    client: client.name, today: today,
+    overdue: open.filter(isOver).map(withWait),
+    ready: open.filter(t => !isOver(t) && t.owner !== '関与先' && t.status !== CFG.TODO_WAITING),
+    waiting: open.filter(t => !isOver(t) && t.status === CFG.TODO_WAITING).map(withWait),
+    clientAsk: open.filter(t => !isOver(t) && t.owner === '関与先' && t.status !== CFG.TODO_WAITING),
+    qClient: qs.filter(q => q.status === '未回答' && isClientQ_(q)).map(qItem),
+    qInner: qs.filter(q => q.status === '未回答' && !isClientQ_(q)).map(qItem),
+    checks: checks,
+    progress: closingProgress_(tasks, closingPeriods_(client), today),
+    periods: closingPeriods_(client),
+    needFiscal: !closingPeriods_(client).length,
+    statuses: CFG.TODO_STATUSES,
+    todoUrl: ss.getUrl() + '#gid=' + ss.getSheetByName(CFG.SHEET_TODO).getSheetId(),
+  };
+}
+
+/** タスクの状態をパネルから変える */
+function updateTodo(clientName, id, status) {
+  if (CFG.TODO_STATUSES.indexOf(status) < 0) throw new Error('状態が正しくありません: ' + status);
+  const client = findClient_(clientName);
+  const ss = openNotebook_(client);
+  const sh = ss.getSheetByName(CFG.SHEET_TODO);
+  const row = findRowById_(sh, id);
+  if (!row) throw new Error('タスクIDが見つかりません: ' + id);
+  sh.getRange(row, 7, 1, 3).setValues([[status, new Date(), 'パネルで状態を' + status + 'に変更']]);
+  sh.getRange(row, 8).setNumberFormat('yyyy-mm-dd hh:mm');
+  return getTodoBoard(clientName);
+}
+
+/** パネルからタスクを1件足す。t = {owner, task, due, related} */
+function addTodo(clientName, t) {
+  t = t || {};
+  if (!String(t.task || '').trim()) throw new Error('タスクを入力してください');
+  const client = findClient_(clientName);
+  const ss = openNotebook_(client);
+  const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  const missing = relatedIds_(t.related).filter(id => !findRowById_(ss.getSheetByName(CFG.SHEET_Q), id));
+  if (missing.length) throw new Error('関連質問が質問票にありません: ' + missing.join(', '));
+  appendTodos_(ss, [{ owner: t.owner, task: String(t.task).trim(), due: ymd_(t.due), related: t.related }], today);
+  return getTodoBoard(clientName);
+}
+
+/* ---------- 決算タスク ---------- */
+
+/** 月末日(m は 1〜12。13 以上は翌年に繰り越す)を yyyy-MM-dd で */
+function monthEnd_(y, m) { return new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10); }
+/** 日付に日数を足す */
+function addDays_(d, n) { return new Date(Date.parse(d) + n * 86400000).toISOString().slice(0, 10); }
+/** 土日なら dir の向き(1 = 翌営業日、-1 = 前営業日)にずらす。祝日は見ない */
+function weekday_(d, dir) {
+  while ([0, 6].indexOf(new Date(Date.parse(d)).getUTCDay()) >= 0) d = addDays_(d, dir);
+  return d;
+}
+
+/**
+ * 関与先の決算期の候補(前年・今年・翌年)。end = 決算日、due = 申告期限(土日は翌営業日)、tag = タスクK列の分類。
+ * 法人は関与先マスタR列の決算月とS列の延長、個人は12月決算・翌年3月15日期限。決算月が無ければ空
+ */
+function closingPeriods_(client) {
+  const personal = client.kind === '個人';
+  const m = personal ? 12 : Number(client.fyMonth);
+  if (!(m >= 1 && m <= 12)) return [];
+  const ext = Number((String(client.extension || '').match(/(\d)/) || [])[1]) || 0;
+  const y = Number(Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy'));
+  return [y - 1, y, y + 1].map(yy => {
+    const end = monthEnd_(yy, m);
+    const due = weekday_(personal ? (yy + 1) + '-03-15' : monthEnd_(yy, m + 2 + ext), 1);
+    return { end: end, due: due, tag: '決算' + end.slice(0, 7), label: personal ? yy + '年分' : yy + '年' + m + '月期' };
+  });
+}
+
+/** 決算タスク(分類が「決算」で始まる)の進み具合。申告期限は関与先の決算期から引く */
+function closingProgress_(tasks, periods, today) {
+  const done = CFG.TODO_STATUSES[CFG.TODO_STATUSES.length - 1];
+  const tags = tasks.map(t => t.category).filter((c, i, a) => /^決算/.test(c) && a.indexOf(c) === i).sort();
+  return tags.map(tag => {
+    const xs = tasks.filter(t => t.category === tag);
+    const p = periods.filter(x => x.tag === tag)[0];
+    return { tag: tag, label: p ? p.label : tag, due: p ? p.due : '', total: xs.length,
+      done: xs.filter(t => t.status === done).length,
+      overdue: xs.filter(t => t.status !== done && ymd_(t.due) && ymd_(t.due) < today).length,
+      waiting: xs.filter(t => t.status === CFG.TODO_WAITING).length };
+  });
+}
+
+/**
+ * 決算タスクを作る。end は決算日(closingPeriods_ の end)。
+ *   1) 雛形の「質問」を質問票に(【2026年8月期】を付けて)入れる
+ *   2) 雛形の「タスク」を期限付きで入れる。関連の質問があれば、回答が入るまで「回答待ち」
+ *   3) 税理士FBから入ったカルテ(前期の指摘)と、使う場面が「決算」の共通ルールを、確認タスクとして足す
+ * 同じ決算期にもう一度押しても、既にある質問・タスクは入れない(雛形に足した分だけ増える)
+ */
+function createClosingTasks(clientName, end) {
+  const client = findClient_(clientName);
+  const p = closingPeriods_(client).filter(x => x.end === end)[0];
+  if (!p) throw new Error('決算期が選べません。関与先マスタR列(決算月)を入れてください');
+  const ss = openNotebook_(client);
+  const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  const kind = client.kind || CFG.CLIENT_KINDS[0];
+  const tpl = readClosingTemplate_().filter(r => r.status !== '廃止' && (r.target === '共通' || r.target === kind) &&
+    (r.condition !== '消費税あり' || client.ctax !== '免税'));
+  // 決算日を過ぎてから作ると、決算日基準の期限が過去になり「期限切れ」だらけになる。
+  // そのときは、決算日〜申告期限の予定を、今日〜申告期限に縮めて当てはめる(順番は変わらない)。申告期限を過ぎていれば元の日付のまま
+  const span = Date.parse(p.due) - Date.parse(p.end);
+  const fit = d => {
+    if (today <= p.end || today >= p.due) return d;
+    const ratio = Math.max(0, (Date.parse(d) - Date.parse(p.end)) / span);
+    const x = weekday_(addDays_(today, Math.round(ratio * (Date.parse(p.due) - Date.parse(today)) / 86400000)), -1);
+    return x < today ? today : x;
+  };
+  let shifted = false;
+  const dueOf = r => {
+    let d = addDays_(r.base === '決算日' ? p.end : p.due, Number(r.days) || 0);
+    if (d > p.due) return r.base === '決算日' ? p.due : weekday_(d, 1); // 決算日基準は申告期限を越えない。申告後の作業はそのまま
+    d = weekday_(d, -1); // 土日は前の営業日
+    const f = fit(d);
+    if (f !== d) shifted = true;
+    return f;
+  };
+
+  // 1) 質問
+  const qSh = ss.getSheetByName(CFG.SHEET_Q);
+  const qSeen = {}, qMap = {};
+  readQuestions_(ss).forEach(q => { qSeen[normText_(q.question)] = q.id; });
+  let qAdded = 0;
+  tpl.filter(r => r.type === '質問').forEach(r => {
+    const text = '【' + p.label + '】' + r.text, k = normText_(text);
+    if (!qSeen[k]) {
+      qSeen[k] = nextId_(qSh, 'Q');
+      qSh.appendRow([qSeen[k], today, s_(text), '決算の定型質問(' + r.id + ')', '未回答', '', '', p.tag + ' 雛形', questionTo_(r.to)]);
+      qAdded++;
+    }
+    qMap[r.id] = qSeen[k];
+  });
+
+  // 2) 3) タスク
+  const have = {}, todos = [];
+  readTodos_(ss).filter(t => t.category === p.tag).forEach(t => { have[normText_(t.task)] = true; });
+  const push = (text, owner, due, related) => {
+    const task = '【' + p.tag + '】' + text, k = normText_(task);
+    if (have[k]) return;
+    have[k] = true;
+    todos.push({ owner: owner, task: task, due: due, related: related || '' });
+  };
+  tpl.filter(r => r.type === 'タスク').forEach(r => push(r.text, r.owner, dueOf(r), r.related ? qMap[r.related] : ''));
+  const review = dueOf({ base: '申告期限', days: -14 });
+  const cut = v => (v.length > 120 ? v.slice(0, 120) + '…' : v);
+  const kSh = ss.getSheetByName(CFG.SHEET_KARTE);
+  (kSh.getLastRow() < 2 ? [] : kSh.getRange(2, 1, kSh.getLastRow() - 1, 6).getDisplayValues())
+    .filter(v => v[0] && v[3] && v[5] !== '廃止' && String(v[4]).indexOf('税理士FB') >= 0)
+    .forEach(v => push('税理士の指摘(' + v[0] + ')を今期も確認: ' + cut(v[2] + ': ' + v[3]), '事務所', review));
+  readFirmRules_().filter(r => r.scene === '決算')
+    .forEach(r => push('共通ルール(' + r.id + ')の確認: ' + cut(r.rule), '事務所', review));
+  const tCount = appendTodos_(ss, todos, today, p.tag);
+  return { label: p.label, due: p.due, questions: qAdded, todos: tCount, shifted: shifted, board: getTodoBoard(clientName) };
+}
+
+/** 決算タスク雛形のシート(マスターSS)。無ければ初期の雛形を入れて作る */
+function getClosingSheet_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName(CFG.CLOSING_SHEET);
+  if (!sh) {
+    sh = ss.insertSheet(CFG.CLOSING_SHEET);
+    initSheet_(sh, CFG.HEADERS.CLOSING, [70, 60, 480, 70, 70, 80, 50, 60, 90, 60, 60, 200]);
+    sh.getRange(2, 1, CLOSING_DEFAULTS.length, CFG.HEADERS.CLOSING.length)
+      .setValues(CLOSING_DEFAULTS.map(r => r.concat(['有効', '初期値'])));
+    const list = (col, values) => sh.getRange(2, col, sh.getMaxRows() - 1, 1).setDataValidation(
+      SpreadsheetApp.newDataValidation().requireValueInList(values, true).setAllowInvalid(false).build());
+    list(2, ['タスク', '質問']); list(4, ['事務所', '関与先']); list(5, CFG.QUESTION_TO); list(6, ['決算日', '申告期限']);
+    list(8, ['共通'].concat(CFG.CLIENT_KINDS)); list(9, ['消費税あり']); list(11, ['有効', '廃止']);
+  }
+  return sh;
+}
+
+function readClosingTemplate_() {
+  const sh = getClosingSheet_();
+  if (sh.getLastRow() < 2) return [];
+  return sh.getRange(2, 1, sh.getLastRow() - 1, CFG.HEADERS.CLOSING.length).getDisplayValues()
+    .map(v => ({ id: v[0], type: v[1] === '質問' ? '質問' : 'タスク', text: v[2], owner: v[3] === '関与先' ? '関与先' : '事務所', to: v[4],
+      base: v[5] === '決算日' ? '決算日' : '申告期限', days: v[6], target: v[7] || '共通', condition: v[8], related: v[9], status: v[10] || '有効' }))
+    .filter(r => r.id && r.text);
+}
+
+/**
+ * 決算タスク雛形の初期値: ID, 種類, 内容, 担当区分, 宛先, 基準, 日数, 対象, 条件, 関連。
+ * 大雅商会の決算で実際に手間がかかった点(仮払金・現金・売掛金・請求書照合・消費税区分)と、法人決算申告の流れから作った。
+ * 入るのは最初にシートを作るときだけ。以後はシートを直接直す
+ */
+const CLOSING_DEFAULTS = [
+  ['D0001', '質問', '期末日時点の手許現金の残高を教えてください(実際に数えた金額)。', '事務所', '関与先', '決算日', 5, '共通', '', ''],
+  ['D0002', '質問', '期末日までの通帳・クレジットカードの明細は、すべてご提出いただいていますか。まだのものがあれば、どの口座・カードか教えてください。', '事務所', '関与先', '決算日', 3, '共通', '', ''],
+  ['D0003', '質問', '期末日時点の在庫(棚卸資産)の一覧と金額を教えてください。在庫がなければ「なし」とご回答ください。', '事務所', '関与先', '決算日', 5, '共通', '', ''],
+  ['D0004', '質問', '期中に購入・売却した10万円以上の資産(車両・機械・パソコンなど)はありますか。あれば請求書・契約書を共有してください。', '事務所', '関与先', '決算日', 5, '共通', '', ''],
+  ['D0005', '質問', '期末日時点で借入金はありますか。ある場合は、残高がわかる書類(残高証明書・返済予定表)はお手元にありますか。', '事務所', '関与先', '決算日', 5, '共通', '', ''],
+  ['D0006', '質問', '期末日までに作業が終わっていて、まだ請求していない売上はありますか。', '事務所', '関与先', '決算日', 5, '共通', '', ''],
+  ['D0007', '質問', '期末日時点で、まだ支払っていない経費(未払いの請求書)はありますか。あれば請求書を共有してください。', '事務所', '関与先', '決算日', 5, '共通', '', ''],
+  ['D0008', '質問', '期中に役員報酬の金額を変えましたか。変えた場合は株主総会(社員総会)の議事録を共有してください。', '事務所', '関与先', '決算日', 5, '法人', '', ''],
+  ['D0101', 'タスク', '通帳・カード明細と帳簿の残高を期末日で照合する', '事務所', '', '決算日', 14, '共通', '', 'D0002'],
+  ['D0102', 'タスク', '仮払金・仮受金・立替金の内訳を確定し、正しい科目に振り替える(残高ゼロが目標)', '事務所', '', '決算日', 21, '共通', '', 'D0002'],
+  ['D0103', 'タスク', '現金残高を実在額と照合し、差額の処理方針(役員借入金との相殺など)を税理士に確認する', '事務所', '', '決算日', 21, '共通', '', 'D0001'],
+  ['D0104', 'タスク', '売掛金を得意先別に消し込み、追えない残高を一覧にして洗替の要否を税理士に確認する', '事務所', '', '決算日', 21, '共通', '', ''],
+  ['D0105', 'タスク', '請求書と売上計上を照合する(計上漏れ・税区分の誤り)', '事務所', '', '決算日', 21, '共通', '', ''],
+  ['D0106', 'タスク', '未請求売上・未払費用・前払費用を計上する', '事務所', '', '決算日', 25, '共通', '', 'D0006'],
+  ['D0107', 'タスク', '消費税の税区分を確認する(課税・非課税・対象外、軽減税率、インボイスの有無)', '事務所', '', '決算日', 25, '共通', '消費税あり', ''],
+  ['D0108', 'タスク', '固定資産の取得・売却を反映し、減価償却費を計上する', '事務所', '', '決算日', 25, '共通', '', 'D0004'],
+  ['D0109', 'タスク', '棚卸資産を計上する', '事務所', '', '決算日', 25, '共通', '', 'D0003'],
+  ['D0110', 'タスク', '借入金の残高を残高証明書・返済予定表と照合する', '事務所', '', '決算日', 25, '共通', '', 'D0005'],
+  ['D0111', 'タスク', '役員報酬が定期同額になっているか確認する', '事務所', '', '決算日', 25, '法人', '', 'D0008'],
+  ['D0112', 'タスク', '試算表を税理士のレビューに出す', '事務所', '', '申告期限', -14, '共通', '', ''],
+  ['D0113', 'タスク', '税理士の指摘を反映する', '事務所', '', '申告期限', -10, '共通', '', ''],
+  ['D0114', 'タスク', '法人税・地方税の申告書、勘定科目内訳書、事業概況書を作成する', '事務所', '', '申告期限', -7, '法人', '', ''],
+  ['D0115', 'タスク', '所得税の確定申告書・青色申告決算書を作成する', '事務所', '', '申告期限', -7, '個人', '', ''],
+  ['D0116', 'タスク', '消費税の申告書を作成する', '事務所', '', '申告期限', -7, '共通', '消費税あり', ''],
+  ['D0117', 'タスク', '申告書の承認を得て電子申告する', '事務所', '', '申告期限', 0, '共通', '', ''],
+  ['D0118', 'タスク', '納税のご案内を作成して送付する(申告・納税タブ)', '事務所', '', '申告期限', -3, '共通', '', ''],
+  ['D0119', 'タスク', '翌期の中間申告(予定納税)の要否と時期を確認する', '事務所', '', '申告期限', 7, '共通', '', ''],
+];
+
+/* ---------- 全関与先の一覧 ---------- */
+
+/** メニューから実行 */
+function refreshDashboardMenu() {
+  const r = refreshDashboard();
+  SpreadsheetApp.getUi().alert('全関与先のタスク一覧を更新しました(' + r.rows + '件)。' + (r.errors.length ? '\n読めなかった関与先:\n' + r.errors.join('\n') : ''));
+}
+
+/**
+ * 全関与先の未完了タスクと未回答の質問を「全関与先タスク」シートに、決算タスクの進み具合を「決算進捗」シートに書き出す。
+ * 設定タブでダッシュボードのURLを入れていればそのスプレッドシートに、無ければマスターに作る(どちらもシートごと作り直す)
+ */
+function refreshDashboard() {
+  const id = PropertiesService.getScriptProperties().getProperty('DASHBOARD_ID');
+  const book = id ? SpreadsheetApp.openById(id) : SpreadsheetApp.getActiveSpreadsheet();
+  const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  const done = CFG.TODO_STATUSES[CFG.TODO_STATUSES.length - 1];
+  const rank = { '高': 0, '中': 1, '低': 2 };
+  const prioDue = d => { const n = d ? -daysSince_(d, today) : null; return n === null ? '低' : n <= 7 ? '高' : n <= 30 ? '中' : '低'; };
+  const prioAge = d => { const n = daysSince_(d, today); return n === null ? '低' : n > 30 ? '高' : n > 14 ? '中' : '低'; };
+  const rows = [], prog = [], errors = [];
+  listClients_().forEach(c => {
+    try {
+      const ss = openNotebook_(c);
+      const gid = name => ss.getUrl() + '#gid=' + ss.getSheetByName(name).getSheetId();
+      const tasks = readTodos_(ss);
+      tasks.filter(t => t.status !== done).forEach(t => rows.push([c.name, (ymd_(t.due) || '').slice(0, 7).replace('-', '/'),
+        /^決算/.test(t.category) ? t.category : 'スポット', t.id + ' ' + t.task, t.status, prioDue(ymd_(t.due)), ymd_(t.due), t.owner, t.related, gid(CFG.SHEET_TODO)]));
+      readQuestions_(ss).filter(q => q.status === '未回答').forEach(q => rows.push([c.name, (ymd_(q.date) || '').slice(0, 7).replace('-', '/'),
+        '質問(' + q.to + ')', q.id + ' ' + q.question, '未回答', prioAge(q.date), '', q.to, '', gid(CFG.SHEET_Q)]));
+      closingProgress_(tasks, closingPeriods_(c), today).forEach(p => prog.push([c.name, p.label, p.due, p.done, p.total,
+        p.overdue, p.waiting, p.total ? Math.round(p.done / p.total * 100) + '%' : '']));
+    } catch (e) {
+      errors.push(c.name + ': ' + e.message);
+    }
+  });
+  rows.sort((a, b) => rank[a[5]] - rank[b[5]] || ((a[6] || '9999') < (b[6] || '9999') ? -1 : 1));
+  writeTable_(book, CFG.DASHBOARD_SHEET, ['関与先名', '対象月', '分類', 'タスク内容', 'ステータス', '優先度', '期限', '担当区分', '関連質問', '詳細・編集用URL'],
+    rows, [180, 70, 110, 480, 80, 60, 100, 70, 90, 260]);
+  writeTable_(book, CFG.PROGRESS_SHEET, ['関与先名', '決算期', '申告期限', '完了', '全体', '期限切れ', '回答待ち', '進捗'],
+    prog, [180, 110, 100, 60, 60, 70, 70, 60]);
+  const sh = book.getSheetByName(CFG.DASHBOARD_SHEET);
+  return { rows: rows.length, errors: errors, url: book.getUrl() + '#gid=' + sh.getSheetId(), updated: today };
+}
+
+/** シートを作り直して表を書く(無ければ作る) */
+function writeTable_(book, name, headers, rows, widths) {
+  const sh = book.getSheetByName(name) || book.insertSheet(name);
+  sh.clearContents();
+  sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold').setBackground('#e8eef7');
+  sh.setFrozenRows(1);
+  if (rows.length) sh.getRange(2, 1, rows.length, headers.length).setValues(rows.map(r => r.map(x => s_(x))));
+  widths.forEach((w, i) => sh.setColumnWidth(i + 1, w));
+}
+
 /* ===================== カレンダー ===================== */
 
 /**
@@ -1774,15 +2148,23 @@ function appendKarte_(ss, items, date, source, status) {
   return rows.length;
 }
 
-function appendTodos_(ss, todos, date) {
+/**
+ * タスクを追記する。related(関連質問のID)があり、その質問がまだ未回答なら「回答待ち」で入れる
+ * (回答が入ると readQuestions_ → syncWaitingTasks_ が「未着手」に戻す)。category は K列「分類」(決算2026-08 など)
+ */
+function appendTodos_(ss, todos, date, category) {
   if (!todos.length) return 0;
   const sh = ss.getSheetByName(CFG.SHEET_TODO);
   const start = sh.getLastRow(), base = idNum_(sh, 'T');
   const now = new Date();
-  const rows = todos.map((t, i) => [
-    'T' + pad_(base + 1 + i), date, t.owner === '関与先' ? '関与先' : '事務所',
-    s_(t.assignee), s_(t.task), s_(t.due), CFG.TODO_STATUSES[0], now, '登録',
-  ]);
+  const open = {};
+  if (todos.some(t => t.related)) readQuestions_(ss).forEach(q => { if (q.status === '未回答') open[q.id] = true; });
+  const rows = todos.map((t, i) => {
+    const rel = relatedIds_(t.related);
+    return ['T' + pad_(base + 1 + i), date, t.owner === '関与先' ? '関与先' : '事務所',
+      s_(t.assignee), s_(t.task), s_(t.due), rel.some(id => open[id]) ? CFG.TODO_WAITING : CFG.TODO_STATUSES[0], now, '登録',
+      rel.join(','), s_(t.category || category || '')];
+  });
   sh.getRange(start + 1, 1, rows.length, rows[0].length).setValues(rows);
   sh.getRange(start + 1, 8, rows.length, 1).setNumberFormat('yyyy-mm-dd hh:mm');
   return rows.length;
@@ -1963,7 +2345,7 @@ function readQuestions_(ss) {
   const sh = ss.getSheetByName(CFG.SHEET_Q);
   if (sh.getLastRow() < 2) return [];
   const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
-  return sh.getRange(2, 1, sh.getLastRow() - 1, 9).getDisplayValues()
+  const list = sh.getRange(2, 1, sh.getLastRow() - 1, 9).getDisplayValues()
     .map((v, i) => {
       if (v[0] && (v[4] === '未回答' || !v[4]) && isRealAnswer_(v[5])) {
         v[4] = '回答済'; v[6] = v[6] || today;
@@ -1972,7 +2354,44 @@ function readQuestions_(ss) {
       return v;
     })
     .filter(v => v[0])
-    .map(v => ({ id: v[0], date: v[1], question: v[2], reason: v[3], status: v[4], answer: v[5], answeredAt: v[6], to: questionTo_(v[8]) }));
+    .map(v => ({ id: v[0], date: v[1], question: v[2], reason: v[3], status: v[4], answer: v[5], answeredAt: v[6], to: questionTo_(v[8]), toRaw: v[8] }));
+  syncWaitingTasks_(ss, list);
+  return list;
+}
+
+/** 「回答待ち」のタスクのうち、関連質問がすべて回答済・取消・重複になったものを「未着手」に戻す */
+function syncWaitingTasks_(ss, qs) {
+  const sh = ss.getSheetByName(CFG.SHEET_TODO);
+  if (!sh || sh.getLastRow() < 2) return;
+  const byId = {};
+  qs.forEach(q => { byId[q.id] = q; });
+  sh.getRange(2, 1, sh.getLastRow() - 1, 10).getDisplayValues().forEach((v, i) => {
+    if (v[6] !== CFG.TODO_WAITING) return;
+    const ids = relatedIds_(v[9]);
+    if (!ids.length || ids.some(id => !byId[id] || byId[id].status === '未回答')) return;
+    sh.getRange(i + 2, 7, 1, 3).setValues([[CFG.TODO_STATUSES[0], new Date(), '回答あり(' + ids.join(',') + ')→着手できます']]);
+    sh.getRange(i + 2, 8).setNumberFormat('yyyy-mm-dd hh:mm');
+  });
+}
+
+/** 文字列から質問ID(Q0001 の形)を取り出す。重複は除く */
+function relatedIds_(v) {
+  return (String(v || '').toUpperCase().match(/Q\d{4,}/g) || []).filter((x, i, a) => a.indexOf(x) === i);
+}
+
+/**
+ * 質問票と同じ線引きを、AIに出させるタスクにも使う(同じ依頼が質問とタスクの両方に入らないように)
+ */
+function todoQuestionRules_() {
+  return [
+    '# todos と new_questions の分け方',
+    '- 関与先に「答えてもらう」こと(事実・意向・取引の内容の確認) → new_questions(to は関与先)。',
+    '- 関与先に「何かしてもらう」こと(資料・明細の送付、納付、手続き) → todos(owner は関与先)。質問にはしない。',
+    '- 税理士に聞くこと・事務所内で調べること → new_questions(to は事務所内)。事務所でやる作業 → todos(owner は事務所)。',
+    '- 質問の回答が来ないと進められない作業は、todos の related にその質問票のIDを入れる(新しく作る質問なら空でよい)。',
+    '- 同じ依頼を new_questions と todos の両方に入れない。',
+    '',
+  ];
 }
 
 /** 宛先の値をそろえる。「事務所内」以外(空欄や旧データ)はすべて「関与先」 */
@@ -1986,9 +2405,15 @@ function getRulesSheet_() {
   let sh = ss.getSheetByName(CFG.RULES_SHEET);
   if (!sh) {
     sh = ss.insertSheet(CFG.RULES_SHEET);
-    initSheet_(sh, CFG.HEADERS.RULES, [70, 520, 260, 70, 100]);
+    initSheet_(sh, CFG.HEADERS.RULES, [70, 520, 260, 70, 100, 80]);
     sh.getRange(2, 4, sh.getMaxRows() - 1, 1).setDataValidation(
       SpreadsheetApp.newDataValidation().requireValueInList(['有効', '廃止'], true).setAllowInvalid(false).build());
+  }
+  // F列「使う場面」は後から足した列。旧版のシートには見出しとプルダウンを足す(空欄は常時)
+  if (sh.getRange(1, 6).getValue() !== '使う場面') {
+    sh.getRange(1, 6).setValue('使う場面').setFontWeight('bold').setBackground('#e8eef7');
+    sh.getRange(2, 6, sh.getMaxRows() - 1, 1).setDataValidation(
+      SpreadsheetApp.newDataValidation().requireValueInList(CFG.RULE_SCENES, true).setAllowInvalid(false).build());
   }
   return sh;
 }
@@ -1997,8 +2422,8 @@ function getRulesSheet_() {
 function readFirmRules_(all) {
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CFG.RULES_SHEET);
   if (!sh || sh.getLastRow() < 2) return [];
-  return sh.getRange(2, 1, sh.getLastRow() - 1, 4).getDisplayValues()
-    .map(v => ({ id: v[0], rule: v[1], source: v[2], status: v[3] || '有効' }))
+  return sh.getRange(2, 1, sh.getLastRow() - 1, 6).getDisplayValues()
+    .map(v => ({ id: v[0], rule: v[1], source: v[2], status: v[3] || '有効', scene: v[5] || CFG.RULE_SCENES[0] }))
     .filter(r => r.id && r.rule && (all || r.status !== '廃止'));
 }
 
@@ -2013,7 +2438,8 @@ function listClients_() {
   if (sh.getLastRow() < 2) return [];
   return sh.getRange(2, 1, sh.getLastRow() - 1, CFG.HEADERS.MASTER.length).getDisplayValues()
     .map((v, i) => ({ row: i + 2, name: v[0], honorific: v[1] || '様', code: v[2], ssId: v[3], url: v[4], folderId: v[5],
-      method: v[7], dest: v[8], sharedFolder: v[9], lang: v[10], internalHook: v[11], nextMtg: v[12], autoBrief: v[13], briefSent: v[14], briefMemo: v[15], kind: v[16] }))
+      method: v[7], dest: v[8], sharedFolder: v[9], lang: v[10], internalHook: v[11], nextMtg: v[12], autoBrief: v[13], briefSent: v[14], briefMemo: v[15], kind: v[16],
+      fyMonth: v[17], extension: v[18], ctax: v[19] }))
     .filter(c => c.name && c.ssId);
 }
 
@@ -2028,9 +2454,9 @@ function getMasterSheet_() {
   let sh = ss.getSheetByName(CFG.MASTER_SHEET);
   if (!sh) {
     sh = ss.insertSheet(CFG.MASTER_SHEET, 0);
-    initSheet_(sh, CFG.HEADERS.MASTER, [220, 60, 110, 320, 320, 260, 110, 110, 260, 320, 100, 260, 110, 150, 150, 320, 70]);
+    initSheet_(sh, CFG.HEADERS.MASTER, [220, 60, 110, 320, 320, 260, 110, 110, 260, 320, 100, 260, 110, 150, 150, 320, 70, 70, 120, 100]);
   } else if (!sh.getRange(1, CFG.HEADERS.MASTER.length).getValue()) {
-    // 旧版で作ったマスタに、後から増えた列見出し(送付用のH〜J、先方言語のK、内部報告先のL、MTG前確認の自動送付用のM〜O、MTG前確認メモのP、区分のQ)を足す
+    // 旧版で作ったマスタに、後から増えた列見出し(送付用のH〜J、先方言語のK、内部報告先のL、MTG前確認の自動送付用のM〜O、MTG前確認メモのP、区分のQ、決算用のR〜T)を足す
     sh.getRange(1, 1, 1, CFG.HEADERS.MASTER.length).setValues([CFG.HEADERS.MASTER]).setFontWeight('bold').setBackground('#e8eef7');
   }
   // H列(送付方法)をプルダウンにする。未設定のときだけ付ける
@@ -2048,6 +2474,12 @@ function getMasterSheet_() {
     sh.getRange(2, 17, sh.getMaxRows() - 1, 1).setDataValidation(
       SpreadsheetApp.newDataValidation().requireValueInList(CFG.CLIENT_KINDS, true).setAllowInvalid(false).build());
   }
+  // R列(決算月 1〜12)・S列(申告期限の延長)・T列(消費税)も同様。決算タスクの期限と項目の選び分けに使う
+  [[18, ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12']], [19, CFG.FISCAL_EXTENSIONS], [20, CFG.CTAX_TYPES]].forEach(d => {
+    if (sh.getRange(2, d[0]).getDataValidation()) return;
+    sh.getRange(2, d[0], sh.getMaxRows() - 1, 1).setDataValidation(
+      SpreadsheetApp.newDataValidation().requireValueInList(d[1], true).setAllowInvalid(false).build());
+  });
   return sh;
 }
 
@@ -2078,7 +2510,7 @@ function ensureNotebook_(ss) {
   [
     [CFG.SHEET_KARTE, CFG.HEADERS.KARTE, [70, 120, 180, 480, 110, 90, 100]],
     [CFG.SHEET_MTG, CFG.HEADERS.MTG, [100, 220, 160, 420, 90, 90, 90, 130]],
-    [CFG.SHEET_TODO, CFG.HEADERS.TODO, [70, 100, 90, 110, 420, 100, 90, 140, 260]],
+    [CFG.SHEET_TODO, CFG.HEADERS.TODO, [70, 100, 90, 110, 420, 100, 90, 140, 260, 110, 110]],
     [CFG.SHEET_Q, CFG.HEADERS.Q, [70, 100, 380, 260, 150, 380, 100, 110, 90]],
   ].forEach(d => {
     if (!ss.getSheetByName(d[0])) initSheet_(ss.insertSheet(d[0]), d[1], d[2]);
@@ -2094,7 +2526,20 @@ function ensureNotebook_(ss) {
   fixDuplicateIds_(ss.getSheetByName(CFG.SHEET_TODO), 'T');
   fixDuplicateIds_(ss.getSheetByName(CFG.SHEET_Q), 'Q');
   const todo = ss.getSheetByName(CFG.SHEET_TODO);
-  dropdown(todo, 7, CFG.TODO_STATUSES);
+  // 状態のプルダウンは「回答待ち」を足した版に入れ替える(旧版のプルダウンのままだと回答待ちを選べない)
+  const tv = todo.getRange(2, 7).getDataValidation();
+  const tvals = tv && tv.getCriteriaValues ? tv.getCriteriaValues()[0] : null;
+  if (!Array.isArray(tvals) || tvals.indexOf(CFG.TODO_WAITING) < 0) {
+    todo.getRange(2, 7, todo.getMaxRows() - 1, 1).setDataValidation(
+      SpreadsheetApp.newDataValidation().requireValueInList(CFG.TODO_STATUSES, true).setAllowInvalid(false).build());
+  }
+  // J列「関連質問」・K列「分類」(決算2026-08 など)。旧版のノートには見出しを足す
+  if (todo.getMaxColumns() < 11) todo.insertColumnsAfter(todo.getMaxColumns(), 11 - todo.getMaxColumns());
+  if (todo.getRange(1, 10).getValue() !== '関連質問') {
+    todo.getRange(1, 10, 1, 2).setValues([['関連質問', '分類']]).setFontWeight('bold').setBackground('#e8eef7');
+    todo.setColumnWidth(10, 110);
+    todo.setColumnWidth(11, 110);
+  }
   // 質問票のI列「宛先」。旧版のノートには見出しとプルダウンを足す(既存の行は空欄 = 関与先のまま)
   const qSh = ss.getSheetByName(CFG.SHEET_Q);
   if (qSh.getMaxColumns() < 9) qSh.insertColumnsAfter(qSh.getMaxColumns(), 9 - qSh.getMaxColumns());

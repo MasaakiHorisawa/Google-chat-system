@@ -41,6 +41,13 @@
   .thumbs div { position:relative; }
   .thumbs img { height:80px; border:1px solid #d9dee5; border-radius:4px; display:block; }
   .thumbs button { position:absolute; top:2px; right:2px; padding:0 6px; font-size:12px; }
+  .sec { margin-top: 12px; }
+  .sec h4 { margin: 0 0 4px; font-size: 13px; }
+  .sec h4 span { font-weight: normal; color: #7b8794; }
+  .sec.warn h4 { color: #a12622; }
+  .sec td.btns { white-space: nowrap; width: 1%; }
+  .sec td.btns button { padding: 3px 8px; font-size: 12px; margin-left: 4px; }
+  #board { max-height: 430px; overflow: auto; }
   .newclient { display: none; margin-top: 8px; padding: 10px; background: #f4f6f9; border-radius: 4px; }
 </style>
 </head>
@@ -59,12 +66,14 @@
     <div><label>敬称</label><select id="ncHon"><option>様</option><option>御中</option></select></div>
     <div><label>区分</label><select id="ncKind"><option value="">(未設定)</option></select></div>
     <div style="flex:2"><label>MFコード(任意)</label><input type="text" id="ncCode" placeholder="1234-5678"></div>
+    <div><label>決算月(法人)</label><select id="ncFy"><option value="">(未設定)</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option><option>11</option><option>12</option></select></div>
   </div>
   <div style="margin-top:8px"><button id="btnAddClient">登録(ノートとフォルダを作成)</button></div>
 </div>
 
 <div class="tabs">
   <div class="tab on" data-p="mtg">議事録作成</div>
+  <div class="tab" data-p="todo">やること</div>
   <div class="tab" data-p="q">質問票</div>
   <div class="tab" data-p="k">カルテ登録</div>
   <div class="tab" data-p="fb">税理士FB</div>
@@ -94,6 +103,29 @@
     <span><input type="checkbox" id="notifyInt" checked> <label for="notifyInt">内部に報告を送る</label></span>
   </div>
   <button id="btnRun">② 議事録を作成</button>
+</div>
+
+<div class="pane" id="p-todo">
+  <div class="row" style="align-items:flex-end">
+    <div style="flex:2"><label>決算期</label><select id="cPeriod"></select></div>
+    <div><button id="btnClose" title="雛形(マスターの「決算タスク雛形」シート)、税理士FBの指摘、決算時の共通ルールから、期限付きのタスクと定型の質問を作ります">決算タスクを作成</button></div>
+    <div style="flex:3"><span class="muted" id="cInfo"></span></div>
+  </div>
+  <div id="cProgress" style="margin-top:6px"></div>
+  <div id="board"></div>
+  <label><strong>タスクを1件追加</strong>(回答を待つ質問のIDを入れると、回答が入るまで「回答待ち」になります)</label>
+  <div class="row">
+    <div><select id="tdOwner"><option>事務所</option><option>関与先</option></select></div>
+    <div style="flex:4"><input type="text" id="tdTask" placeholder="やること"></div>
+    <div style="flex:1.3"><input type="date" id="tdDue"></div>
+    <div style="flex:1.3"><input type="text" id="tdRel" placeholder="回答待ちの質問 例 Q0003"></div>
+    <div><button class="sub" id="btnTdAdd">追加</button></div>
+  </div>
+  <div style="margin-top:12px">
+    <button class="sub" id="btnDash" title="全関与先の未完了タスク・未回答の質問と、決算の進み具合をシートに書き出します">全関与先の一覧を更新</button>
+    <a id="dashLink" class="muted" style="margin-left:8px"></a>
+    <a id="todoLink" class="muted" style="margin-left:8px">この関与先のタスクシートを開く</a>
+  </div>
 </div>
 
 <div class="pane" id="p-q">
@@ -240,6 +272,8 @@
   </div>
   <label>内部報告用 Google Chat(Webhook URL または spaces/〜 のスペースID。議事録の報告・MTG前確認の送り先) <span class="muted" id="intState"></span></label>
   <input type="text" id="internalHook" placeholder="変更するときだけ入力">
+  <label>全関与先ダッシュボード(スプレッドシートのURL。空ならマスターに「全関与先タスク」「決算進捗」シートを作ります) <span class="muted" id="dashState"></span></label>
+  <input type="text" id="dashboardUrl" placeholder="変更するときだけ入力"> 
   <label>LINE WORKS Bot <span class="muted" id="lwState"></span></label>
   <div class="row">
     <div><input type="text" id="lwClientId" placeholder="Client ID"></div>
@@ -258,7 +292,7 @@
 <script>
   const $ = id => document.getElementById(id);
   const DEFAULT_LANG = '日本語';
-  const PANEL_VERSION = '2026-10-20e'; // Code.gs の CFG.VERSION と同じ値にする
+  const PANEL_VERSION = '2026-10-21a'; // Code.gs の CFG.VERSION と同じ値にする
   let clients = [], questions = [], tpl = null, sendInfo = null;
 
   function status(kind, text, links, actions) {
@@ -316,6 +350,7 @@
     if (mt.ja) { $('tplJaSubject').value = mt.ja.subject; $('tplJaBody').value = mt.ja.body; }
     if (mt.en) { $('tplEnSubject').value = mt.en.subject; $('tplEnBody').value = mt.en.body; }
     $('intState').textContent = d.hasInternalChat ? '(登録済)' : '(未登録)';
+    $('dashState').textContent = d.hasDashboard ? '(登録済)' : '(マスターに作成)';
     onClientChange();
     if (!clients.length) $('newclient').style.display = 'block';
   }
@@ -338,6 +373,7 @@
     if ($('p-k').classList.contains('on')) loadIntakeTemplate();
     fbPlan = null; renderFbPlan(); clearFbImages(); // 別の関与先の変更案・画像を残さない
     if ($('p-fb').classList.contains('on')) loadFeedbackTemplate();
+    if ($('p-todo').classList.contains('on')) loadBoard(); else { $('board').innerHTML = ''; board = null; }
   }
 
   const DEST_HINT = {
@@ -750,11 +786,13 @@
       '{',
       '  "new_questions": [{"to": "関与先|事務所内", "question": "確認すること", "reason": "確認が必要な理由"}],',
       '  "knowledge": [{"category": "' + cats + '", "item": "項目名", "content": "判明した処理ルール"}],',
-      '  "todos": [{"owner": "事務所", "assignee": "担当者名または空", "task": "やること", "due": "YYYY-MM-DDまたは空"}]',
+      '  "todos": [{"owner": "事務所|関与先", "assignee": "担当者名または空", "task": "やること", "due": "YYYY-MM-DDまたは空", "related": "回答を待つ質問のID(既存の質問票のID)または空"}]',
       '}',
       '',
       '振り分け方:',
-      '- 関与先に聞かないと分からないこと・資料の提出依頼 → new_questions(to は「関与先」)。1件1論点にし、相手が取引を特定できるよう日付・金額・相手先を質問文に書く。reason に該当仕訳の日付・金額・摘要を書く。',
+      '- 関与先に答えてもらうこと(取引の内容・意向の確認) → new_questions(to は「関与先」)。1件1論点にし、相手が取引を特定できるよう日付・金額・相手先を質問文に書く。reason に該当仕訳の日付・金額・摘要を書く。',
+      '- 関与先に何かしてもらうこと(資料・明細の送付、手続き) → todos(owner は「関与先」)。質問にはしない。同じ依頼を質問とタスクの両方に入れない。',
+      '- 既存の質問の回答が来ないと進められない作業は、todos の related にその質問のIDを入れる。',
       '- 税理士に判断を仰ぐこと、事務所内で調べること、関与先に見せるべきでない論点 → new_questions(to は「事務所内」)。迷ったら「事務所内」にする。',
       '- 帳簿や資料から確定できた処理ルール(今後も同じ処理をするもの) → knowledge。',
       '- 事務所側で修正・対応すること → todos(owner は「事務所」)。',
@@ -795,6 +833,93 @@
     call('processIntake', [{ client: $('client').value, text: '', source: $('kImportSrc').value.trim() || '監査', resultJson: json }], r => {
       intakeDone(r);
       $('kImport').value = '';
+    });
+  }
+
+  /* ---------- やること一覧・決算タスク ---------- */
+  let board = null;
+  function loadBoard() {
+    const name = $('client').value;
+    if (!name) return;
+    call('getTodoBoard', [name], b => { if ($('client').value === name) renderBoard(b); });
+  }
+  function renderBoard(b) {
+    board = b;
+    const sel = $('cPeriod'), prev = sel.value; sel.innerHTML = '';
+    b.periods.forEach(p => { const o = document.createElement('option'); o.value = p.end; o.textContent = p.label + '(申告期限 ' + p.due + ')'; sel.appendChild(o); });
+    // 初期値は、まだ申告期限が来ていない一番近い決算期
+    if (prev && b.periods.some(p => p.end === prev)) sel.value = prev;
+    else { const next = b.periods.filter(p => p.due >= b.today)[0]; if (next) sel.value = next.end; }
+    $('cInfo').textContent = b.needFiscal ? '関与先マスタR列(決算月)が空です。決算月を入れると決算タスクを作れます(個人は12月決算で自動)' : '';
+    $('todoLink').href = b.todoUrl;
+    const prog = $('cProgress'); prog.innerHTML = '';
+    b.progress.forEach(p => {
+      const d = document.createElement('div');
+      d.textContent = '■ ' + p.label + ' の決算: ' + p.done + '/' + p.total + '件完了' + (p.overdue ? ' ・期限切れ ' + p.overdue + '件' : '') +
+        (p.waiting ? ' ・回答待ち ' + p.waiting + '件' : '') + (p.due ? '(申告期限 ' + p.due + ')' : '');
+      if (p.overdue) d.style.color = '#a12622';
+      prog.appendChild(d);
+    });
+    const box = $('board'); box.innerHTML = '';
+    const sec = (title, items, row, warn) => {
+      if (!items.length) return;
+      const d = document.createElement('div'); d.className = 'sec' + (warn ? ' warn' : '');
+      const h = document.createElement('h4'); h.textContent = title + ' '; const n = document.createElement('span'); n.textContent = items.length + '件'; h.appendChild(n);
+      const t = document.createElement('table'); items.forEach(x => t.appendChild(row(x)));
+      d.appendChild(h); d.appendChild(t); box.appendChild(d);
+    };
+    const tr = (text, btns) => {
+      const r = document.createElement('tr'), a = document.createElement('td');
+      a.textContent = text; a.style.whiteSpace = 'pre-wrap'; r.appendChild(a);
+      const c = document.createElement('td'); c.className = 'btns';
+      (btns || []).forEach(x => { const b2 = document.createElement('button'); b2.className = 'sub'; b2.textContent = x[0]; b2.onclick = x[1]; c.appendChild(b2); });
+      r.appendChild(c); return r;
+    };
+    const set = (t, s) => () => { const name = $('client').value; call('updateTodo', [name, t.id, s], nb => { if ($('client').value === name) renderBoard(nb); }); };
+    const task = t => tr(t.id + ' ' + t.task + (t.due ? '(期限 ' + t.due + ')' : '') + (t.owner === '関与先' ? ' [関与先]' : '') + ' — ' + t.status +
+      ((t.waitFor || []).length ? '\n回答待ち: ' + t.waitFor.join('、') : ''),
+      (t.status === '進行中' ? [] : [['進行中', set(t, '進行中')]]).concat([['対応済', set(t, '対応済')]]));
+    const q = x => tr(x.id + ' ' + x.text + '(起票から' + (x.days == null ? '?' : x.days) + '日)');
+    sec('期限切れ', b.overdue, task, true);
+    sec('着手できる(事務所)', b.ready, task);
+    sec('回答待ち', b.waiting, task);
+    sec('関与先にお願いしていること', b.clientAsk, task);
+    sec('関与先への未回答の質問', b.qClient, q);
+    sec('事務所内の確認事項(未回答)', b.qInner, q);
+    sec('要確認(データの点検)', b.checks, x => tr(x.id + ' ' + x.text), true);
+    if (!box.children.length) box.textContent = 'やることはありません';
+  }
+  function createClosing() {
+    const name = $('client').value, end = $('cPeriod').value;
+    if (!name) return fail('関与先を選択または登録してください');
+    if (!end) return fail('決算期を選んでください(法人は関与先マスタR列に決算月を入れます)');
+    const label = $('cPeriod').options[$('cPeriod').selectedIndex].textContent;
+    if (!confirm('「' + name + '」の ' + label + ' の決算タスクと定型の質問を作ります。\n同じ決算期で作成済みのものは入れません。よろしいですか?')) return;
+    status('info', '決算タスクを作成中です');
+    call('createClosingTasks', [name, end], r => {
+      if ($('client').value === name) renderBoard(r.board);
+      status('ok', r.label + ' の決算タスク ' + r.todos + '件・定型の質問 ' + r.questions + '件を作成しました(申告期限 ' + r.due + ')。' +
+        (r.shifted ? '\n決算日を過ぎてからの作成なので、過ぎていた期限は今日〜申告期限の間に詰めました。' : '') +
+        '\n関連する質問に回答が入るまで「回答待ち」になるタスクがあります。質問は質問票タブからまとめて送れます');
+      loadTemplate();
+    });
+  }
+  function addTodoRow() {
+    const name = $('client').value, task = $('tdTask').value.trim();
+    if (!name) return fail('関与先を選択または登録してください');
+    if (!task) return fail('タスクを入力してください');
+    call('addTodo', [name, { owner: $('tdOwner').value, task: task, due: $('tdDue').value, related: $('tdRel').value }], b => {
+      $('tdTask').value = ''; $('tdDue').value = ''; $('tdRel').value = '';
+      if ($('client').value === name) renderBoard(b);
+      status('ok', 'タスクを追加しました');
+    });
+  }
+  function refreshDash() {
+    status('info', '全関与先の一覧を作成中です(関与先の数だけ時間がかかります)');
+    call('refreshDashboard', [], r => {
+      $('dashLink').href = r.url; $('dashLink').textContent = '全関与先の一覧を開く';
+      status(r.errors.length ? 'err' : 'ok', '全関与先の一覧を更新しました(' + r.rows + '件)' +
+        (r.errors.length ? '\n読めなかった関与先:\n・' + r.errors.join('\n・') : '') + '\n', [{ label: '一覧を開く', url: r.url }]);
     });
   }
 
@@ -941,6 +1066,7 @@
     if (t.dataset.p === 'send') loadSend();
     if (t.dataset.p === 'k') loadIntakeTemplate();
     if (t.dataset.p === 'fb') loadFeedbackTemplate();
+    if (t.dataset.p === 'todo') loadBoard();
   });
   $('client').onchange = onClientChange;
   $('showAll').onchange = () => renderQuestions(questions);
@@ -948,7 +1074,7 @@
   $('btnAddClient').onclick = () => {
     const name = $('ncName').value.trim();
     status('info', '関与先ノートを作成中です');
-    call('addClient', [name, $('ncHon').value, $('ncCode').value.trim(), $('ncKind').value], d => {
+    call('addClient', [name, $('ncHon').value, $('ncCode').value.trim(), $('ncKind').value, $('ncFy').value], d => {
       applyInit(d, name); $('newclient').style.display = 'none'; $('ncName').value = ''; $('ncCode').value = '';
       status('ok', '登録しました: ' + name);
     });
@@ -970,6 +1096,9 @@
   $('btnFbPlan').onclick = () => reviewFeedback(false);
   $('btnFbDup').onclick = () => reviewFeedback(true);
   $('btnFbApply').onclick = applyFeedbackPlan;
+  $('btnClose').onclick = createClosing;
+  $('btnTdAdd').onclick = addTodoRow;
+  $('btnDash').onclick = refreshDash;
   $('fbFile').onchange = () => { addFbImages($('fbFile').files); $('fbFile').value = ''; };
   // 税理士FBタブを開いているときの Ctrl+V は、画像が含まれていれば画像として取り込む(文章はそのまま欄に入る)
   document.addEventListener('paste', e => {
@@ -1030,13 +1159,13 @@
   $('btnSave').onclick = () => call('saveSettings', [{
     apiKey: $('apiKey').value, model: $('model').value, firmName: $('firmName').value, templateUrl: $('tplUrl').value, cwToken: $('cwToken').value,
     lwClientId: $('lwClientId').value, lwClientSecret: $('lwClientSecret').value, lwServiceAccount: $('lwServiceAccount').value,
-    lwBotId: $('lwBotId').value, lwKey: $('lwKey').value, internalHook: $('internalHook').value,
+    lwBotId: $('lwBotId').value, lwKey: $('lwKey').value, internalHook: $('internalHook').value, dashboardUrl: $('dashboardUrl').value,
     mailTemplates: {
       ja: { subject: $('tplJaSubject').value, body: $('tplJaBody').value },
       en: { subject: $('tplEnSubject').value, body: $('tplEnBody').value },
     },
   }], d => {
-    ['apiKey', 'tplUrl', 'cwToken', 'lwClientId', 'lwClientSecret', 'lwServiceAccount', 'lwBotId', 'lwKey', 'internalHook'].forEach(k => $(k).value = ''); applyInit(d); status('ok', '設定を保存しました');
+    ['apiKey', 'tplUrl', 'cwToken', 'lwClientId', 'lwClientSecret', 'lwServiceAccount', 'lwBotId', 'lwKey', 'internalHook', 'dashboardUrl'].forEach(k => $(k).value = ''); applyInit(d); status('ok', '設定を保存しました');
   });
 
   call('getInitData', [], d => {
