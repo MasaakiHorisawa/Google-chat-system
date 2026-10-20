@@ -1,0 +1,858 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_blank">
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: "Noto Sans JP", "Hiragino Sans", Meiryo, sans-serif; font-size: 13px; color: #1f2933; margin: 0; padding: 14px 18px; }
+  .top { display: flex; gap: 8px; align-items: center; padding-bottom: 10px; border-bottom: 1px solid #d9dee5; }
+  .top select { flex: 1; }
+  .tabs { display: flex; gap: 4px; margin: 10px 0; }
+  .tab { padding: 6px 14px; border: 1px solid #d9dee5; border-radius: 4px; background: #f4f6f9; cursor: pointer; }
+  .tab.on { background: #1f4e8c; color: #fff; border-color: #1f4e8c; }
+  .pane { display: none; }
+  .pane.on { display: block; }
+  label { display: block; font-size: 12px; color: #52606d; margin: 8px 0 3px; }
+  input[type=text], input[type=date], input[type=password], select, textarea {
+    width: 100%; padding: 6px 8px; border: 1px solid #c3cad3; border-radius: 4px; font: inherit; }
+  textarea#transcript, textarea#result { height: 165px; resize: vertical; font-size: 12px; line-height: 1.5; }
+  .row { display: flex; gap: 10px; }
+  .row > div { flex: 1; }
+  .checks { display: flex; gap: 18px; margin: 10px 0; }
+  .checks label { display: inline; margin: 0; font-size: 13px; color: #1f2933; }
+  button { padding: 7px 16px; border: 1px solid #1f4e8c; background: #1f4e8c; color: #fff; border-radius: 4px; cursor: pointer; font: inherit; }
+  button.sub { background: #fff; color: #1f4e8c; }
+  button:disabled { opacity: .5; cursor: default; }
+  .muted { color: #7b8794; font-size: 12px; }
+  #status { margin-top: 10px; padding: 9px 11px; border-radius: 4px; display: none; white-space: pre-wrap; }
+  #status.info { display: block; background: #eef3fa; }
+  #status.ok { display: block; background: #e7f5ea; }
+  #status.err { display: block; background: #fdecea; color: #a12622; }
+  #status a { margin-right: 14px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  th, td { border-bottom: 1px solid #e3e7ec; padding: 6px; text-align: left; vertical-align: top; }
+  th { font-size: 12px; color: #52606d; background: #f4f6f9; }
+  td.ans { width: 38%; }
+  .qlist { max-height: 380px; overflow: auto; }
+  .newclient { display: none; margin-top: 8px; padding: 10px; background: #f4f6f9; border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<div class="top">
+  <strong>関与先</strong>
+  <select id="client"></select>
+  <button class="sub" id="btnNew">＋新規</button>
+  <a id="ssLink" class="muted">ノートを開く</a>
+  <button class="sub" id="btnBrief" title="関与先ノートのリンク・未回答の質問・未完了タスク・前回MTGの要約を内部のGoogle Chatに送ります">MTG前確認を送る</button>
+</div>
+<div class="newclient" id="newclient">
+  <div class="row">
+    <div style="flex:3"><label>関与先名</label><input type="text" id="ncName"></div>
+    <div><label>敬称</label><select id="ncHon"><option>様</option><option>御中</option></select></div>
+    <div><label>区分</label><select id="ncKind"><option value="">(未設定)</option></select></div>
+    <div style="flex:2"><label>MFコード(任意)</label><input type="text" id="ncCode" placeholder="1234-5678"></div>
+  </div>
+  <div style="margin-top:8px"><button id="btnAddClient">登録(ノートとフォルダを作成)</button></div>
+</div>
+
+<div class="tabs">
+  <div class="tab on" data-p="mtg">議事録作成</div>
+  <div class="tab" data-p="q">質問票</div>
+  <div class="tab" data-p="k">カルテ登録</div>
+  <div class="tab" data-p="tax">申告・納税</div>
+  <div class="tab" data-p="send">送付</div>
+  <div class="tab" data-p="set">設定</div>
+</div>
+
+<div class="pane on" id="p-mtg">
+  <div class="row">
+    <div><label>会議日</label><input type="date" id="date"></div>
+    <div style="flex:3"><label>参加者(任意。空なら文字起こしから推定)</label><input type="text" id="attendees"></div>
+    <div><label>先方用資料の言語</label><select id="clientLang"></select></div>
+  </div>
+  <label>① 文字起こし <span class="muted" id="count"></span></label>
+  <textarea id="transcript" placeholder="文字起こしを貼り付け → Ctrl+Enter でプロンプトをコピー → Geminiに貼り付け"></textarea>
+  <div style="margin-top:6px">
+    <button id="btnPrompt">① プロンプトをコピー</button>
+    <a class="muted" href="https://gemini.google.com/app" style="margin-left:10px">Geminiを開く</a>
+  </div>
+  <label>② Geminiの回答(JSON)</label>
+  <textarea id="result" placeholder="Geminiが返したJSONを貼り付け → Ctrl+Enter で作成"></textarea>
+  <div class="checks">
+    <span><input type="checkbox" id="makePdf" checked> <label for="makePdf">先方用PDFも作成</label></span>
+    <span><input type="checkbox" id="keep" checked> <label for="keep">文字起こし原文を議事録末尾に保存</label></span>
+    <span><input type="checkbox" id="addCal" checked> <label for="addCal">次回MTGをカレンダーに登録</label></span>
+    <span><input type="checkbox" id="notifyInt" checked> <label for="notifyInt">内部に報告を送る</label></span>
+  </div>
+  <button id="btnRun">② 議事録を作成</button>
+</div>
+
+<div class="pane" id="p-q">
+  <div class="row">
+    <div><label>宛先</label><select id="qTo"><option>関与先</option><option>事務所内</option></select></div>
+    <div style="flex:3"><label>質問・確認事項</label><input type="text" id="qText"></div>
+    <div style="flex:2"><label>背景・理由(任意)</label><input type="text" id="qReason"></div>
+  </div>
+  <div style="margin-top:8px">
+    <button id="btnAddQ">質問を追加</button>
+    <button class="sub" id="btnQPdf">未回答分をPDF出力</button>
+    <span style="margin-left:10px"><input type="checkbox" id="showAll"> <label for="showAll" style="display:inline">回答済も表示</label></span>
+  </div>
+  <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+    <button class="sub" id="btnQMsg">未回答分を送信用の文面にまとめる</button>
+    <select id="qLang" style="width:auto" title="文面の言語"></select>
+    <button id="btnQCopy" style="display:none">文面をコピー</button>
+  </div>
+  <textarea id="qMsg" style="height:170px;margin-top:6px;display:none" placeholder="ここに文面が出ます。送る前に自由に直せます"></textarea>
+
+  <div class="qlist"><table><thead><tr><th>ID</th><th>宛先</th><th>質問・確認事項</th><th>状態</th><th>回答</th><th></th></tr></thead><tbody id="qBody"></tbody></table></div>
+</div>
+
+<div class="pane" id="p-k">
+  <div class="muted" style="margin-top:6px">会議以外(メールの返信など)で分かった仕訳ルール等を、関与先カルテに登録します。</div>
+  <div style="margin-top:8px"><button class="sub" id="btnKRules" title="カルテ(確認済・未確認)、未回答の質問、未完了のタスクをMarkdownでコピーします">Claudeにルールを渡す</button>
+    <span class="muted">Claudeで作業を始めるときに押して、Claudeのチャットに貼り付けます</span></div>
+  <label><strong>手入力で1件登録</strong>(状態は「確認済」で入ります)</label>
+  <div class="row">
+    <div><label>カテゴリ</label><select id="kCat"></select></div>
+    <div style="flex:2"><label>項目</label><input type="text" id="kItem" placeholder="例: Wise手数料の科目"></div>
+    <div><label>出典(任意)</label><input type="text" id="kSrc" placeholder="例: メール 10/6"></div>
+  </div>
+  <label>内容</label>
+  <textarea id="kContent" style="height:60px" placeholder="例: Wiseの送金手数料は支払手数料(対象外)で処理する"></textarea>
+  <div style="margin-top:6px"><button id="btnAddK">カルテに登録</button></div>
+
+  <label style="margin-top:14px"><strong>メール等の文面から抽出</strong>(Gemini。カルテは「未確認」で入り、質問票の回答も拾います)</label>
+  <div class="row">
+    <div style="flex:4"><textarea id="kText" style="height:110px;font-size:12px" placeholder="① 届いたメール・チャットの文面を貼り付け"></textarea></div>
+    <div><label style="margin-top:0">出典</label><input type="text" id="kSource" value="メール">
+      <div style="margin-top:8px"><button id="btnKPrompt">① プロンプトをコピー</button></div>
+      <div style="margin-top:6px"><a class="muted" href="https://gemini.google.com/app">Geminiを開く</a></div></div>
+  </div>
+  <textarea id="kResult" style="height:80px;font-size:12px;margin-top:6px" placeholder="② Geminiが返したJSONを貼り付け"></textarea>
+  <div style="margin-top:6px"><button id="btnKRun">② 抽出結果を登録</button></div>
+
+  <label style="margin-top:14px"><strong>監査結果などを貼り付けて登録</strong>(Geminiを通しません。Claudeの監査結果を質問票・カルテ・タスクに振り分けます)</label>
+  <div class="row">
+    <div style="flex:4"><textarea id="kImport" style="height:110px;font-size:12px" placeholder="ClaudeのJSONを貼り付け(質問・カルテ・タスクに振り分け)。JSONでなければ、1行を1件の質問として質問票に登録します"></textarea></div>
+    <div><label style="margin-top:0">出典</label><input type="text" id="kImportSrc" value="監査">
+      <div style="margin-top:8px"><button id="btnKImport">貼り付けた内容を登録</button></div>
+      <div style="margin-top:6px"><button class="sub" id="btnKSpec" title="監査をしているClaudeのチャットに貼ると、この欄にそのまま貼れるJSONで出力されます">Claudeへの指示文をコピー</button></div></div>
+  </div>
+</div>
+
+<div class="pane" id="p-tax">
+  <div class="muted" style="margin-top:6px">申告書の納付額から「納税のご案内」(Doc/PDF)を作り、納期限をタスクに登録します。金額は下の表で確認・修正した値が使われます。</div>
+  <div class="row">
+    <div><label>区分</label><select id="tKind"></select></div>
+    <div style="flex:2"><label>対象(期・年分)</label><input type="text" id="tPeriod" placeholder="例: 第1期(2024-11-11〜2025-10-31)"></div>
+    <div><label>申告の種類</label><select id="tType"></select></div>
+    <div><label>案内の言語</label><select id="tLang"></select></div>
+  </div>
+  <label><strong>申告書から読み取る(任意)</strong> Geminiに申告書のPDFを添付し、プロンプトを貼って送信 → 返ってきたJSONを貼って「表に反映」</label>
+  <div class="row">
+    <div style="flex:4"><textarea id="tJson" style="height:60px;font-size:12px" placeholder="Geminiが返したJSONを貼り付け(使わない場合は空のまま、下の表に手入力)"></textarea></div>
+    <div><button class="sub" id="btnTPrompt">プロンプトをコピー</button>
+      <div style="margin-top:6px"><button class="sub" id="btnTApply">表に反映</button></div></div>
+  </div>
+  <div style="margin-top:8px"><button class="sub" id="btnTPreset">手入力用の行を出す</button> <button class="sub" id="btnTAdd">1行追加</button></div>
+  <table><thead><tr><th>税目</th><th>納付先</th><th style="width:130px">納付額(円)</th><th style="width:140px">納期限</th><th style="width:110px">年税額(参考)</th></tr></thead><tbody id="tBody"></tbody>
+    <tfoot><tr><th colspan="2" style="text-align:right">納付額の合計</th><th id="tTotal">0</th><th colspan="2" id="tSlips" class="muted"></th></tr></tfoot></table>
+  <div class="checks"><span><input type="checkbox" id="tTasks" checked> <label for="tTasks">納期限をタスクに登録</label></span></div>
+  <button id="btnTRun">納税のご案内を作成</button>
+</div>
+
+<div class="pane" id="p-send">
+  <div class="row">
+    <div><label>送付方法</label>
+      <select id="sMethod"><option value="">(未設定)</option><option>メール</option><option>Chatwork</option><option>Google Chat</option><option>LINE WORKS</option><option>共有フォルダのみ</option></select></div>
+    <div style="flex:2"><label id="sDestLabel">送付先</label><input type="text" id="sDest"></div>
+    <div style="flex:2"><label>先方共有フォルダ(DriveのURL)</label><input type="text" id="sFolder"></div>
+  </div>
+  <div style="margin-top:8px"><button class="sub" id="btnSaveSend">送付設定を保存</button></div>
+  <label>送付する会議</label>
+  <select id="sMtg"></select>
+  <label>添付するPDFを差し替える(任意。空なら、選んだ会議の先方用PDFを送ります)</label>
+  <div class="row">
+    <div style="flex:3"><input type="text" id="sAttach" placeholder="DriveのURLを貼る、または右でPCのPDFを選ぶ"></div>
+    <div style="flex:2"><input type="file" id="sFile" accept="application/pdf,.pdf"></div>
+  </div>
+  <label>件名(メールのみ)</label>
+  <input type="text" id="sSubject">
+  <label>本文(共有フォルダ設定時は、末尾にPDFのリンクが自動で付きます)</label>
+  <textarea id="sMsg" style="height:170px"></textarea>
+  <div style="margin-top:8px">
+    <button id="btnSend">送信</button>
+    <button class="sub" id="btnSendInt" title="選んだ会議の要約・決定事項・事務所のタスクとリンクを、内部のGoogle Chatに送ります">この会議を内部に報告</button>
+    <a id="sPdf" class="muted" style="margin-left:10px">送付するPDFを開いて確認</a>
+  </div>
+</div>
+
+<div class="pane" id="p-set">
+  <label>Gemini APIキー(任意。貼り付け方式では不要) <span class="muted" id="keyState"></span></label>
+  <input type="password" id="apiKey" placeholder="変更するときだけ入力">
+  <label>モデル名</label>
+  <input type="text" id="model">
+  <label>事務所名(先方用PDFに表示)</label>
+  <input type="text" id="firmName">
+  <label>関与先ノートのテンプレート(スプレッドシートのURL。任意) <span class="muted" id="tplState"></span></label>
+  <input type="text" id="tplUrl" placeholder="変更するときだけ入力">
+  <label>Chatwork APIトークン <span class="muted" id="cwState"></span></label>
+  <input type="password" id="cwToken" placeholder="変更するときだけ入力">
+  <label>送付文面のテンプレート(差し込み: {client} 関与先名 / {honorific} 敬称 / {date} 会議日 / {firm} 事務所名。空欄で保存すると初期値に戻ります)</label>
+  <div class="row">
+    <div><input type="text" id="tplJaSubject" placeholder="件名(日本語)"><textarea id="tplJaBody" style="height:130px;margin-top:6px" placeholder="本文(日本語)"></textarea></div>
+    <div><input type="text" id="tplEnSubject" placeholder="件名(日本語以外の会議)"><textarea id="tplEnBody" style="height:130px;margin-top:6px" placeholder="本文(日本語以外の会議)"></textarea></div>
+  </div>
+  <label>内部報告用 Google Chat(Webhook URL または spaces/〜 のスペースID。議事録の報告・MTG前確認の送り先) <span class="muted" id="intState"></span></label>
+  <input type="text" id="internalHook" placeholder="変更するときだけ入力">
+  <label>LINE WORKS Bot <span class="muted" id="lwState"></span></label>
+  <div class="row">
+    <div><input type="text" id="lwClientId" placeholder="Client ID"></div>
+    <div><input type="password" id="lwClientSecret" placeholder="Client Secret"></div>
+  </div>
+  <div class="row" style="margin-top:6px">
+    <div><input type="text" id="lwServiceAccount" placeholder="Service Account"></div>
+    <div><input type="text" id="lwBotId" placeholder="Bot ID"></div>
+  </div>
+  <textarea id="lwKey" style="height:60px;margin-top:6px" placeholder="Private Key(-----BEGIN PRIVATE KEY----- から全部)"></textarea>
+  <div style="margin-top:10px"><button id="btnSave">保存</button></div>
+</div>
+
+<div id="status"></div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  const DEFAULT_LANG = '日本語';
+  const PANEL_VERSION = '2026-10-16b'; // Code.gs の CFG.VERSION と同じ値にする
+  let clients = [], questions = [], tpl = null, sendInfo = null;
+
+  function status(kind, text, links, actions) {
+    const el = $('status');
+    el.className = kind; el.textContent = text;
+    (actions || []).forEach(a => {
+      const b = document.createElement('button'); b.className = 'sub'; b.textContent = a.label; b.style.marginRight = '10px';
+      b.onclick = () => a.run(b);
+      el.appendChild(b);
+    });
+    (links || []).forEach(l => {
+      if (!l.url) return;
+      const a = document.createElement('a'); a.href = l.url; a.textContent = l.label;
+      el.appendChild(document.createTextNode(' ')); el.appendChild(a);
+    });
+  }
+  function fail(e) { status('err', 'エラー: ' + (e && e.message ? e.message : e)); busy(false); }
+  function busy(b) { document.querySelectorAll('button').forEach(x => x.disabled = b); }
+  function call(fn, args, done) {
+    const run = google.script.run.withFailureHandler(fail).withSuccessHandler(r => { busy(false); done(r); });
+    // Code.gs が古いとサーバー側の関数が無く、何も起きないまま止まるので、はっきりエラーにする
+    if (typeof run[fn] !== 'function') return fail('Code.gs に ' + fn + ' がありません。Code.gs を最新版に差し替えて保存し、パネルを開き直してください');
+    busy(true);
+    run[fn](...args);
+  }
+
+  function applyInit(d, keepSel) {
+    const prev = keepSel || $('client').value;
+    clients = d.clients;
+    const fillSel = (id, list) => { const el = $(id); if (el.options.length > (id === 'ncKind' ? 1 : 0)) return;
+      (list || []).forEach(x => { const o = document.createElement('option'); o.textContent = x; el.appendChild(o); }); };
+    fillSel('ncKind', d.kinds); fillSel('tKind', d.kinds); fillSel('tType', d.taxReturnTypes); fillSel('tLang', d.langs); fillSel('qLang', d.langs);
+    taxPrompts = d.taxPrompts || {}; taxNoticeTitle = d.taxNoticeTitle || '納税のご案内';
+    const kc = $('kCat');
+    if (!kc.options.length) (d.karteCategories || []).forEach(x => { const o = document.createElement('option'); o.textContent = x; kc.appendChild(o); });
+    const ls = $('clientLang');
+    if (!ls.options.length) (d.langs || [DEFAULT_LANG]).forEach(l => { const o = document.createElement('option'); o.textContent = l; ls.appendChild(o); });
+    const sel = $('client'); sel.innerHTML = '';
+    clients.forEach(c => {
+      const o = document.createElement('option');
+      o.value = c.name; o.textContent = c.name + (c.code ? '(' + c.code + ')' : '');
+      sel.appendChild(o);
+    });
+    if (prev && clients.some(c => c.name === prev)) sel.value = prev;
+    if (!$('date').value) $('date').value = d.today;
+    $('model').value = d.model; $('firmName').value = d.firmName;
+    $('keyState').textContent = d.hasKey ? '(登録済)' : '(未登録)';
+    $('cwState').textContent = d.hasChatwork ? '(登録済)' : '(未登録)';
+    $('tplState').textContent = d.hasTemplate ? '(登録済)' : '(未登録)';
+    $('lwState').textContent = d.hasLineWorks ? '(登録済)' : '(未登録)';
+    const mt = d.mailTemplates || {};
+    if (mt.ja) { $('tplJaSubject').value = mt.ja.subject; $('tplJaBody').value = mt.ja.body; }
+    if (mt.en) { $('tplEnSubject').value = mt.en.subject; $('tplEnBody').value = mt.en.body; }
+    $('intState').textContent = d.hasInternalChat ? '(登録済)' : '(未登録)';
+    onClientChange();
+    if (!clients.length) $('newclient').style.display = 'block';
+  }
+
+  function currentClient() { return clients.filter(x => x.name === $('client').value)[0]; }
+
+  function onClientChange() {
+    const c = currentClient();
+    $('ssLink').href = c ? c.url : '#';
+    // 先方用資料の言語は、その関与先で前回使った言語を初期値にする(プルダウンに無い値なら日本語)
+    $('clientLang').value = (c && c.lang) || DEFAULT_LANG;
+    $('tLang').value = (c && c.lang) || DEFAULT_LANG; if (!$('tLang').value) $('tLang').value = DEFAULT_LANG;
+    $('qLang').value = (c && c.lang) || DEFAULT_LANG; if (!$('qLang').value) $('qLang').value = DEFAULT_LANG;
+    hideQMsg(); // 別の関与先の文面を残さない
+    if (c && c.kind) $('tKind').value = c.kind;
+    if (!$('clientLang').value) $('clientLang').value = DEFAULT_LANG;
+    loadTemplate();
+    if ($('p-q').classList.contains('on')) loadQuestions();
+    if ($('p-send').classList.contains('on')) loadSend();
+    if ($('p-k').classList.contains('on')) loadIntakeTemplate();
+  }
+
+  const DEST_HINT = {
+    'メール': '送付先(メールアドレス。複数はカンマ区切り)', 'Chatwork': '送付先(ルームID。URL末尾 rid の数字)',
+    'Google Chat': '送付先(Webhook URL または spaces/〜 のスペースID)', 'LINE WORKS': '送付先(トークルームのチャンネルID)', '共有フォルダのみ': '送付先(不要)',
+  };
+  // 差し替えの添付は、関与先や会議を変えたら必ず消す(別の関与先に誤って付けないため)
+  function clearAttach() { $('sAttach').value = ''; $('sFile').value = ''; updatePdfLink(); }
+  function updatePdfLink() {
+    const m = selMtg(), a = $('sAttach').value.trim();
+    $('sPdf').href = a || (m ? m.pdfUrl : '') || '#';
+    $('sPdf').textContent = a ? '差し替えたPDFを開いて確認' : '送付するPDFを開いて確認';
+  }
+  function uploadAttach() {
+    const f = $('sFile').files[0];
+    if (!f) return;
+    if (!$('client').value) { $('sFile').value = ''; return fail('関与先を選択してください'); }
+    if (!/\.pdf$/i.test(f.name)) { $('sFile').value = ''; return fail('PDFファイルを選んでください'); }
+    if (f.size > 20 * 1024 * 1024) { $('sFile').value = ''; return fail('20MBを超えるファイルは扱えません。Driveに置いてURLを貼ってください'); }
+    const name = $('client').value, reader = new FileReader();
+    reader.onerror = () => fail('ファイルを読めませんでした');
+    reader.onload = () => {
+      status('info', f.name + ' を「' + name + '」の先方渡し用フォルダに保存中です');
+      call('uploadAttachment', [name, f.name, String(reader.result).split(',')[1]], r => {
+        if ($('client').value !== name) return; // 保存中に関与先を変えた場合は付けない
+        $('sAttach').value = r.url; updatePdfLink();
+        status('ok', '添付を差し替えました: ' + r.name + '\n', [{ label: '開いて確認', url: r.url }]);
+      });
+    };
+    reader.readAsDataURL(f);
+  }
+  function loadSend() {
+    if (!$('client').value) return;
+    clearAttach();
+    call('getSendInfo', [$('client').value], renderSend);
+  }
+  function renderSend(d) {
+    sendInfo = d;
+    $('sMethod').value = d.method || ''; $('sDest').value = d.dest; $('sFolder').value = d.sharedFolder;
+    $('sDestLabel').textContent = DEST_HINT[d.method] || '送付先';
+    const sel = $('sMtg'); sel.innerHTML = '';
+    d.meetings.forEach(m => {
+      const o = document.createElement('option');
+      o.value = m.row; o.textContent = m.date + ' ' + m.title + (m.pdfUrl ? '' : '(先方用PDFなし)') + (m.sent ? '(送付済 ' + m.sent + ')' : '');
+      sel.appendChild(o);
+    });
+    if (!d.meetings.length) {
+      const o = document.createElement('option'); o.value = ''; o.textContent = '会議の記録がありません'; sel.appendChild(o);
+    }
+    fillMessage();
+  }
+  function selMtg() { return sendInfo ? sendInfo.meetings.filter(m => String(m.row) === $('sMtg').value)[0] : null; }
+  function fillMessage() {
+    const m = selMtg();
+    updatePdfLink();
+    if (!m) { $('sSubject').value = ''; $('sMsg').value = ''; return; }
+    // 文面はその会議の先方用資料の言語に合わせる(日本語以外は英語)。テンプレートは設定タブで書き換えられる
+    const en = m.lang && m.lang !== DEFAULT_LANG;
+    // 「納税のご案内」の行は、打合せ用ではなく納税用の文面にする
+    const TAX_TPL = {
+      ja: { subject: '【{firm}】納税のご案内', body: '{client} {honorific}\n\nいつもお世話になっております。{firm}です。\n納税のご案内をお送りいたします。\n納期限までに納付をお願いいたします。ご不明な点がございましたらお知らせください。\n\nよろしくお願いいたします。' },
+      en: { subject: '[{firm}] Tax payment notice', body: 'Dear {client},\n\nPlease find the tax payment notice.\nKindly make the payments by the due dates shown. Please let us know if you have any questions.\n\nBest regards,\n{firm}' },
+    };
+    const t = (m.title.indexOf(taxNoticeTitle) === 0 ? TAX_TPL : sendInfo.templates)[en ? 'en' : 'ja'];
+    const vals = { client: sendInfo.client, honorific: sendInfo.honorific, date: m.date, firm: sendInfo.firmName || '' };
+    // 事務所名が未設定のときに残る空の括弧や「です。」を消す
+    const fill = s => s.replace(/\{(client|honorific|date|firm)\}/g, (x, k) => vals[k])
+      .replace(/【】|\[\] ?/g, '').replace(/。です。/g, '。').trim();
+    $('sSubject').value = fill(t.subject);
+    $('sMsg').value = fill(t.body);
+  }
+  function sendInternal() {
+    const m = selMtg();
+    if (!sendInfo || !m) return fail('報告する会議を選んでください');
+    status('info', '内部に報告を送信中です');
+    call('sendInternalReport', [sendInfo.client, m.row], r => {
+      if (r.sent !== false) return status('ok', m.date + ' ' + m.title + ' を内部のGoogle Chatに報告しました');
+      status('err', '内部への報告を自動で送れませんでした。本文をコピーして、Chatに貼り付けてください。\n理由: ' + r.error + '\n', [CHAT_LINK], pasteActions(r.text));
+    });
+  }
+  function send() {
+    const m = selMtg();
+    if (!sendInfo || !m) return fail('送付する会議を選んでください');
+    const attach = $('sAttach').value.trim();
+    if (!m.pdfUrl && !attach) return fail('この会議には先方用PDFがありません。PDFを差し替えの欄で指定すれば送れます(内部への報告は「この会議を内部に報告」から)');
+    if ($('sMethod').value !== (sendInfo.method || '') || $('sDest').value.trim() !== sendInfo.dest || $('sFolder').value.trim() !== sendInfo.sharedFolder)
+      return fail('送付設定を変更しています。先に「送付設定を保存」を押してください');
+    if (!sendInfo.method) return fail('送付方法を設定してください');
+    const dest = sendInfo.dest.length > 60 ? sendInfo.dest.slice(0, 60) + '…' : sendInfo.dest;
+    const msg = '「' + sendInfo.client + '」へ ' + sendInfo.method + (dest ? '(' + dest + ')' : '') + ' で送信します。\n' + m.date + ' ' + m.title +
+      (m.sent ? '\n※この会議は送付済です(' + m.sent + ')' : '') +
+      (attach ? '\n\n※添付は差し替えたPDFを送ります(この会議の先方用PDFではありません)' : '') + '\n\n送信後は取り消せません。PDFの内容は確認しましたか?';
+    if (!confirm(msg)) return;
+    status('info', '送信中です');
+    call('sendToClient', [{ client: sendInfo.client, row: m.row, subject: $('sSubject').value, message: $('sMsg').value, attachUrl: attach }], r => {
+      if (!r.failed) clearAttach();
+      renderSend(r.info);
+      if (r.failed) return status('err', 'Google Chatに自動で送れませんでした。本文をコピーして、Chatに貼り付けてください(送付済の記録は付きません)。\n理由: ' +
+        r.detail + '\n', [CHAT_LINK], pasteActions(r.text));
+      status('ok', r.detail + '\n', r.link ? [{ label: '共有フォルダのPDF', url: r.link }] : []);
+    });
+  }
+
+  function loadQuestions() {
+    if (!$('client').value) return;
+    call('getQuestions', [$('client').value], renderQuestions);
+  }
+
+  function renderQuestions(list) {
+    questions = list;
+    const body = $('qBody'); body.innerHTML = '';
+    const all = $('showAll').checked;
+    list.filter(q => all || q.status !== '回答済').forEach(q => {
+      const tr = document.createElement('tr');
+      const td = t => { const x = document.createElement('td'); x.textContent = t; tr.appendChild(x); return x; };
+      td(q.id); td(q.to || '関与先').style.whiteSpace = 'nowrap'; td(q.question + (q.reason ? '\n(' + q.reason + ')' : '')).style.whiteSpace = 'pre-wrap'; td(q.status);
+      const a = document.createElement('td'); a.className = 'ans';
+      const inp = document.createElement('input'); inp.type = 'text'; inp.value = q.answer || '';
+      a.appendChild(inp); tr.appendChild(a);
+      const b = document.createElement('td');
+      const btn = document.createElement('button'); btn.className = 'sub';
+      btn.textContent = q.status === '未回答' ? '回答済にする' : '確定';
+      btn.onclick = () => call('answerQuestion', [$('client').value, q.id, inp.value], l => { renderQuestions(l); loadTemplate(); });
+      b.appendChild(btn); tr.appendChild(b);
+      body.appendChild(tr);
+    });
+    if (!body.children.length) {
+      const tr = document.createElement('tr'); const x = document.createElement('td');
+      x.colSpan = 6; x.className = 'muted'; x.textContent = '該当する質問はありません'; tr.appendChild(x); body.appendChild(tr);
+    }
+  }
+
+  function copyText(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+    return ok;
+  }
+  // 選択中の関与先のプロンプト雛形を先読みしておく(ボタンを押した瞬間にコピーできるように)
+  function loadTemplate() {
+    const name = $('client').value;
+    tpl = null;
+    if (!name) return;
+    google.script.run
+      .withFailureHandler(e => status('err', 'エラー: ' + (e && e.message ? e.message : e)))
+      .withSuccessHandler(r => { if (r.client === $('client').value) tpl = r; })
+      .getPromptTemplate(name);
+  }
+  function copyPrompt() {
+    const name = $('client').value;
+    const t = $('transcript').value.trim();
+    if (!name) return fail('関与先を選択または登録してください');
+    if (t.length < 50) return fail('文字起こしを貼り付けてください');
+    if (!tpl || tpl.client !== name) return status('info', name + ' の情報を読み込み中です。数秒後にもう一度押してください');
+    const s = tpl.template
+      .replace('{{DATE}}', () => $('date').value)
+      .replace('{{ATTENDEES}}', () => $('attendees').value.trim() || '不明')
+      .replace('{{CLIENT_LANG}}', () => $('clientLang').value);
+    const text = s.slice(0, s.lastIndexOf('{{TRANSCRIPT}}')) + t;
+    if (!copyText(text)) return fail('コピーできませんでした。もう一度押してください');
+    status('ok', '「' + name + '」用のプロンプトをコピーしました(' + text.length.toLocaleString() +
+      '文字 / 先方用資料の言語: ' + $('clientLang').value + ')。Geminiに貼り付けて送信し、返ってきたJSONを②に貼ってください\n',
+      [{ label: 'Geminiを開く', url: 'https://gemini.google.com/app' }]);
+    $('result').focus();
+  }
+
+  function run() {
+    const res = $('result').value.trim();
+    if (!$('client').value) return fail('関与先を選択または登録してください');
+    if (!res) return fail('②にGeminiの回答を貼り付けてください');
+    const lang = $('clientLang').value;
+    // 回答の先方用部分が選択中の言語と違うときは、訳して作るか、言語を選び直すかをここで決めてもらう
+    if ($('makePdf').checked) {
+      const got = clientDocIsJapanese(res);
+      if (got !== null && got !== (lang === DEFAULT_LANG)) {
+        if (!confirm('Geminiの回答の先方用部分は' + (got ? '日本語' : '日本語以外') + 'で書かれていますが、「先方用資料の言語」は「' + lang + '」です。\n\n' +
+          'OK: Google翻訳で「' + lang + '」に訳して作成する\nキャンセル: 作成をやめて、言語を選び直す')) return;
+      }
+    }
+    status('info', '作成中です(閉じずにお待ちください)');
+    call('processMeeting', [{
+      client: $('client').value, date: $('date').value, attendees: $('attendees').value.trim(),
+      transcript: $('transcript').value.trim(), resultJson: res, panelVersion: PANEL_VERSION,
+      makePdf: $('makePdf').checked, keepTranscript: $('keep').checked, clientLang: lang, addCalendar: $('addCal').checked, notifyInternal: $('notifyInt').checked,
+    }], r => {
+      const c = r.counts;
+      const cur = currentClient();
+      if (cur) cur.lang = lang; // 次回の初期値(サーバー側も関与先マスタK列に保存済み)
+      status('ok', '完了: ' + r.title + (r.clientLang ? '(先方用資料: ' + r.clientLang + ')' : '') + '\nタスク ' + c.todos + '件 / カルテ追加 ' + c.knowledge + '件(未確認) / 新規質問 ' +
+        c.newQuestions + '件 / 回答抽出 ' + c.answered + '件' + nextMeetingLine(r.nextMeeting) + internalLine(r.internalReport) + (r.langNote ? '\n※' + r.langNote : '') + '\n', [
+        { label: '会議シート', url: r.sheetUrl }, { label: '議事録Doc', url: r.docUrl },
+        { label: '先方用Doc', url: r.clientDocUrl }, { label: '先方用PDF', url: r.pdfUrl },
+      ], pasteActions(r.internalReport && r.internalReport.text));
+      $('transcript').value = ''; $('result').value = ''; $('attendees').value = ''; updateCount();
+      loadTemplate(); // カルテと質問票が更新されたので雛形を取り直す
+    });
+  }
+
+  function nextMeetingLine(nm) {
+    if (!nm) return '';
+    if (nm.error) return '\n※次回MTGをカレンダーに登録できませんでした: ' + nm.error;
+    if (nm.skipped) return '\n次回MTG ' + nm.label + ': ' + nm.skipped;
+    return '\n次回MTG ' + nm.label + ' をカレンダーに登録しました(AI抽出。日時を確認してください)';
+  }
+
+  function internalLine(rep) {
+    if (!rep) return '';
+    if (rep.error) return '\n※内部への報告を自動で送れませんでした(下のボタンで本文をコピーして貼り付けできます): ' + rep.error;
+    if (rep.skipped) return '\n内部への報告は未送信です(送信先が未登録。下のボタンで本文をコピーして貼り付けできます)';
+    return '\n内部のGoogle Chatに報告を送りました';
+  }
+  // Google Chatに自動で送れなかった本文を、手で貼り付けるためのコピーボタン。
+  // Webhook/API用の <URL|表示名> は手入力では効かないので「表示名: URL」に直す
+  function pasteActions(text) {
+    if (!text) return [];
+    const plain = text.replace(/<([^|>]+)\|([^>]+)>/g, '$2: $1');
+    return [{ label: '本文をコピー(Chatに貼り付け)', run: b => { b.textContent = copyText(plain) ? 'コピーしました' : 'コピーできませんでした。もう一度押してください'; } }];
+  }
+  const CHAT_LINK = { label: 'Google Chatを開く', url: 'https://chat.google.com/' };
+
+  function sendBrief() {
+    const name = $('client').value;
+    if (!name) return fail('関与先を選択または登録してください');
+    // その場で1行足せる。キャンセルなら送らない。毎回入れたい文は関与先マスタP列(MTG前確認メモ)に書く
+    // 開催日時は関与先マスタM列の値を初期値にして確認する。ここで入れた日時はM列にも保存される
+    const c = currentClient();
+    const mtg = prompt('「' + name + '」のMTG前確認を送ります。\nMTGの開催日時を確認してください(例: 2026-10-07 14:00。時刻は省略可。空なら日時の行は出ません)。', (c && c.nextMtg) || '');
+    if (mtg === null) return;
+    const extra = prompt('本文に追加する文があれば入力してください(空のままOKで追加なし)。', '');
+    if (extra === null) return;
+    status('info', 'MTG前確認を送信中です');
+    call('sendPreMeetingBrief', [name, extra.trim(), mtg.trim()], r => {
+      if (c && r.nextMtg !== undefined) c.nextMtg = r.nextMtg;
+      if (r.sent !== false) return status('ok', '「' + r.client + '」のMTG前確認を内部のGoogle Chatに送りました');
+      status('err', 'MTG前確認を自動で送れませんでした。本文をコピーして、Chatに貼り付けてください。\n理由: ' + r.error + '\n', [CHAT_LINK], pasteActions(r.text));
+    });
+  }
+
+  /* ---------- 申告・納税 ---------- */
+  let taxPrompts = {}, taxNoticeTitle = '納税のご案内', taxRows = [], taxExtra = {};
+  const TAX_PRESET = {
+    '法人': ['法人税', '地方法人税', '消費税及び地方消費税', '法人県民税・事業税・特別法人事業税', '法人市町村民税'],
+    '個人': ['所得税及び復興特別所得税', '消費税及び地方消費税'],
+  };
+  const yen = v => { const n = Number(String(v == null ? '' : v).replace(/[,\s円¥]/g, '')); return isFinite(n) ? Math.round(n) : 0; };
+  const comma = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  function renderTax() {
+    const body = $('tBody'); body.innerHTML = '';
+    taxRows.forEach(r => {
+      const tr = document.createElement('tr');
+      [['tax', 'text'], ['payee', 'text'], ['amount', 'text'], ['due', 'date'], ['annual', 'text']].forEach(f => {
+        const td = document.createElement('td'), inp = document.createElement('input');
+        inp.type = f[1]; inp.value = r[f[0]] == null ? '' : r[f[0]];
+        inp.oninput = () => { r[f[0]] = inp.value; taxTotal(); };
+        td.appendChild(inp); tr.appendChild(td);
+      });
+      body.appendChild(tr);
+    });
+    taxTotal();
+  }
+  function taxTotal() {
+    const pay = taxRows.filter(r => yen(r.amount) > 0);
+    $('tTotal').textContent = comma(pay.reduce((a, r) => a + yen(r.amount), 0)) + ' 円';
+    const payees = pay.map(r => String(r.payee || '').trim()).filter((x, i, a) => x && a.indexOf(x) === i);
+    $('tSlips').textContent = pay.length ? '納付する税目 ' + pay.length + '件 / 納付先 ' + payees.length + 'か所' : '納付なし';
+  }
+  // 納期限の初期値。確定申告だけ計算し、それ以外は空のまま人が入れる。土日は翌月曜にずらす(祝日は見ない)
+  function defaultDue(kind, type, to, tax) {
+    if (type !== '確定' || !/^\d{4}-\d{2}-\d{2}$/.test(to || '')) return '';
+    const p = to.split('-').map(Number);
+    let d;
+    if (kind === '個人') d = new Date(Date.UTC(p[0] + 1, 2, tax.indexOf('消費') >= 0 ? 31 : 15));
+    else {
+      const monthEnd = new Date(Date.UTC(p[0], p[1], 0)).getUTCDate() === p[2];
+      d = monthEnd ? new Date(Date.UTC(p[0], p[1] + 2, 0)) : new Date(Date.UTC(p[0], p[1] + 1, p[2]));
+    }
+    while (d.getUTCDay() === 0 || d.getUTCDay() === 6) d = new Date(d.getTime() + 86400000);
+    return d.toISOString().slice(0, 10);
+  }
+  function copyTaxPrompt() {
+    const t = taxPrompts[$('tKind').value];
+    if (!t) return fail('プロンプトを読み込めていません。パネルを開き直してください');
+    if (!copyText(t)) return fail('コピーできませんでした。もう一度押してください');
+    status('ok', $('tKind').value + 'の申告書用プロンプトをコピーしました。Geminiに申告書のPDFを添付し、プロンプトを貼って送信してください。' +
+      '\n※個人の申告書は、マイナンバーの入っていない控え・ページだけを渡してください\n', [{ label: 'Geminiを開く', url: 'https://gemini.google.com/app' }]);
+  }
+  function applyTaxJson() {
+    const raw = $('tJson').value, a = raw.indexOf('{'), b = raw.lastIndexOf('}');
+    if (a < 0 || b <= a) return fail('JSONが見つかりません。Geminiの回答を { から } まで全部貼り付けてください');
+    let j;
+    try { j = JSON.parse(raw.slice(a, b + 1)); } catch (e) { return fail('JSONとして読めません(途中で切れている可能性): ' + e.message); }
+    const pr = j.period || {};
+    if (j.entity_type && Array.from($('tKind').options).some(o => o.textContent === j.entity_type)) $('tKind').value = j.entity_type;
+    if (j.return_type && Array.from($('tType').options).some(o => o.textContent === j.return_type)) $('tType').value = j.return_type;
+    $('tPeriod').value = [pr.label, pr.from && pr.to ? '(' + pr.from + '〜' + pr.to + ')' : ''].filter(String).join('');
+    taxRows = (Array.isArray(j.payments) ? j.payments : []).filter(x => x && x.tax).map(x => ({
+      tax: x.tax, payee: x.payee || '', amount: x.due_now == null ? '' : x.due_now, annual: x.annual == null ? '' : x.annual,
+      paid: x.paid, refund: x.refund, due: yen(x.due_now) > 0 ? defaultDue($('tKind').value, $('tType').value, pr.to, x.tax) : '',
+    }));
+    taxExtra = { figures: j.figures || {}, knowledge: j.knowledge || [], interim: !!(j.next_interim && j.next_interim.required) };
+    renderTax();
+    const notes = (Array.isArray(j.notes) ? j.notes : []).filter(String);
+    const nameWarn = j.name && $('client').value && String(j.name).replace(/\s/g, '').indexOf($('client').value.replace(/\s/g, '').slice(0, 4)) < 0
+      ? '\n※申告書の名義「' + j.name + '」と、選択中の関与先「' + $('client').value + '」が違うように見えます' : '';
+    status(notes.length || nameWarn ? 'err' : 'ok', '表に反映しました。金額と納期限を申告書と突き合わせてから「納税のご案内を作成」を押してください。' + nameWarn +
+      (notes.length ? '\n読み取り時の注意:\n・' + notes.join('\n・') : ''));
+  }
+  function runTax() {
+    if (!$('client').value) return fail('関与先を選択または登録してください');
+    const rows = taxRows.filter(r => String(r.tax || '').trim());
+    if (!rows.length) return fail('表に税目がありません。「手入力用の行を出す」か、JSONを貼って「表に反映」してください');
+    const pay = rows.filter(r => yen(r.amount) > 0);
+    if (pay.some(r => !r.due)) return fail('納付額のある行に納期限を入れてください');
+    const total = pay.reduce((a, r) => a + yen(r.amount), 0);
+    if (!confirm('「' + $('client').value + '」の納税のご案内を作成します。\n\n' +
+      (pay.length ? pay.map(r => r.tax + ' ' + comma(yen(r.amount)) + '円 期限 ' + r.due).join('\n') + '\n合計 ' + comma(total) + '円' : '今回の納付なし') +
+      '\n\n金額と納期限は申告書と突き合わせましたか?')) return;
+    status('info', '作成中です');
+    call('createTaxNotice', [{
+      client: $('client').value, kind: $('tKind').value, lang: $('tLang').value, period: $('tPeriod').value, returnType: $('tType').value,
+      payments: rows, makeTasks: $('tTasks').checked, interim: taxExtra.interim, figures: taxExtra.figures, knowledge: taxExtra.knowledge,
+    }], r => {
+      const cur = currentClient(); if (cur && !cur.kind) cur.kind = $('tKind').value;
+      status('ok', '納税のご案内を作成しました: 納付 ' + r.counts.payments + '件 合計 ' + comma(r.total) + '円 / タスク ' + r.counts.todos + '件 / カルテ ' +
+        r.counts.knowledge + '件(未確認)\n送付は「送付」タブから行えます(内容を確認してから送ってください)\n',
+        [{ label: 'PDF', url: r.pdfUrl }, { label: '編集用Doc', url: r.docUrl }]);
+      $('tJson').value = ''; taxRows = []; taxExtra = {}; renderTax();
+      loadTemplate();
+    });
+  }
+
+  /* ---------- カルテ登録 ---------- */
+  let intakeTpl = null;
+  const karteLink = url => [{ label: 'カルテを開く', url: url }];
+  function addKarte() {
+    if (!$('client').value) return fail('関与先を選択または登録してください');
+    if (!$('kContent').value.trim()) return fail('内容を入力してください');
+    call('addKarte', [$('client').value, $('kCat').value, $('kItem').value, $('kContent').value, $('kSrc').value], r => {
+      status('ok', 'カルテに登録しました: ' + ($('kItem').value.trim() || $('kCat').value) + '\n', karteLink(r.karteUrl));
+      $('kItem').value = ''; $('kContent').value = '';
+      loadTemplate(); loadIntakeTemplate(); // カルテが変わったので雛形を取り直す
+    });
+  }
+  // 議事録と同じく、押した瞬間にコピーできるよう雛形を先読みしておく
+  function loadIntakeTemplate() {
+    const name = $('client').value;
+    intakeTpl = null;
+    if (!name) return;
+    google.script.run
+      .withFailureHandler(e => status('err', 'エラー: ' + (e && e.message ? e.message : e)))
+      .withSuccessHandler(r => { if (r.client === $('client').value) intakeTpl = r; })
+      .getIntakeTemplate(name);
+  }
+  function copyIntakePrompt() {
+    const name = $('client').value, t = $('kText').value.trim();
+    if (!name) return fail('関与先を選択または登録してください');
+    if (t.length < 10) return fail('文面を貼り付けてください');
+    if (!intakeTpl || intakeTpl.client !== name) return status('info', name + ' の情報を読み込み中です。数秒後にもう一度押してください');
+    const s = intakeTpl.template.replace('{{SOURCE}}', () => $('kSource').value.trim() || 'メール');
+    const text = s.slice(0, s.lastIndexOf('{{TEXT}}')) + t;
+    if (!copyText(text)) return fail('コピーできませんでした。もう一度押してください');
+    status('ok', '「' + name + '」用のプロンプトをコピーしました。Geminiに貼り付けて送信し、返ってきたJSONを②に貼ってください\n',
+      [{ label: 'Geminiを開く', url: 'https://gemini.google.com/app' }]);
+    $('kResult').focus();
+  }
+  function runIntake() {
+    const res = $('kResult').value.trim();
+    if (!$('client').value) return fail('関与先を選択または登録してください');
+    if (!res) return fail('②にGeminiの回答を貼り付けてください');
+    status('info', '登録中です');
+    call('processIntake', [{ client: $('client').value, text: $('kText').value.trim(), source: $('kSource').value.trim(), resultJson: res }], r => {
+      intakeDone(r);
+      $('kText').value = ''; $('kResult').value = '';
+    });
+  }
+  function intakeDone(r) {
+    const c = r.counts, sk = r.skipped || [];
+    const dup = c.skipped ? '\n既にあるものと同じ内容 ' + c.skipped + '件は登録しませんでした:\n・' + sk.join('\n・') +
+      (c.skipped > sk.length ? '\n…ほか ' + (c.skipped - sk.length) + '件' : '') : '';
+    status('ok', '登録しました: 新規質問 ' + c.newQuestions + '件 / カルテ追加 ' + c.knowledge + '件(未確認) / タスク ' + (c.todos || 0) +
+      '件 / 回答抽出 ' + c.answered + '件' + dup + '\n',
+      [{ label: '質問票を開く', url: r.questionsUrl }, { label: 'カルテを開く', url: r.karteUrl }, { label: 'タスクを開く', url: r.todosUrl }]);
+    loadTemplate(); loadIntakeTemplate(); // カルテと質問票が変わったので雛形を取り直す
+  }
+
+  // 監査をしているClaudeに渡す指示文。既にある質問・カルテ・タスクも載せて、同じ論点を出させない
+  function copyImportSpec() {
+    const name = $('client').value;
+    if (!name) return fail('関与先を選択または登録してください');
+    if (!intakeTpl || intakeTpl.client !== name) return status('info', name + ' の情報を読み込み中です。数秒後にもう一度押してください');
+    const cats = Array.from($('kCat').options).map(o => o.textContent).join('|');
+    const list = (title, items) => [title].concat(items.length ? items : ['(なし)']);
+    const spec = [
+      '「' + name + '」の監査結果を、議事録システムに取り込める次の形式のJSONだけで出力してください(前後の説明文は不要)。',
+      '{',
+      '  "new_questions": [{"to": "関与先|事務所内", "question": "確認すること", "reason": "確認が必要な理由"}],',
+      '  "knowledge": [{"category": "' + cats + '", "item": "項目名", "content": "判明した処理ルール"}],',
+      '  "todos": [{"owner": "事務所", "assignee": "担当者名または空", "task": "やること", "due": "YYYY-MM-DDまたは空"}]',
+      '}',
+      '',
+      '振り分け方:',
+      '- 関与先に聞かないと分からないこと・資料の提出依頼 → new_questions(to は「関与先」)。1件1論点にし、相手が取引を特定できるよう日付・金額・相手先を質問文に書く。reason に該当仕訳の日付・金額・摘要を書く。',
+      '- 税理士に判断を仰ぐこと、事務所内で調べること、関与先に見せるべきでない論点 → new_questions(to は「事務所内」)。迷ったら「事務所内」にする。',
+      '- 帳簿や資料から確定できた処理ルール(今後も同じ処理をするもの) → knowledge。',
+      '- 事務所側で修正・対応すること → todos(owner は「事務所」)。',
+      '- 金額・日付・固有名詞は帳簿のとおりに書く。推測は書かない。税務判断が必要なものは「税理士確認」と付ける。',
+      '- 下の「既にあるもの」と同じ論点は、言い回しが違っても出さない。',
+      '- 該当が無い項目は空配列にする。',
+      '',
+      '# 既にあるもの(出さない)',
+    ].concat(list('未回答の質問:', intakeTpl.questions || []))
+      .concat(['']).concat(list('カルテ:', intakeTpl.karte ? intakeTpl.karte.split('\n') : []))
+      .concat(['']).concat(list('未完了のタスク:', intakeTpl.todos || []))
+      .join('\n');
+    if (!copyText(spec)) return fail('コピーできませんでした。もう一度押してください');
+    status('ok', '「' + name + '」用の指示文をコピーしました(既にある質問・カルテ・タスク込み)。監査をしているチャットに貼り付け、返ってきたJSONをこの欄に貼って「貼り付けた内容を登録」を押してください');
+  }
+  // 関与先のルール(カルテ・未回答の質問・未完了のタスク)をMarkdownでコピーし、Claudeのチャットに貼ってもらう
+  function copyClientRules() {
+    const name = $('client').value;
+    if (!name) return fail('関与先を選択または登録してください');
+    if (!intakeTpl || intakeTpl.client !== name || !intakeTpl.rulesMd) return status('info', name + ' の情報を読み込み中です。数秒後にもう一度押してください');
+    if (!copyText(intakeTpl.rulesMd)) return fail('コピーできませんでした。もう一度押してください');
+    status('ok', '「' + name + '」のルールをMarkdownでコピーしました。Claudeのチャットに貼り付けてください(Claudeが作業用に保存して使います)');
+  }
+  function runImport() {
+    const raw = $('kImport').value.trim();
+    if (!$('client').value) return fail('関与先を選択または登録してください');
+    if (!raw) return fail('登録する内容を貼り付けてください');
+    let json = raw;
+    if (raw.indexOf('{') < 0) {
+      // JSONでなければ、1行を1件の質問として扱う(行頭の「・」「1.」などは外す)
+      const lines = raw.split(/\r?\n/).map(x => x.replace(/^\s*(?:[-・•*●■□◆▶]|\d+[.)、．]|[①-⑳])\s*/, '').trim()).filter(x => x.length >= 4);
+      if (!lines.length) return fail('登録できる行がありません');
+      if (!confirm('JSONではないので、' + lines.length + '行をそれぞれ1件の質問として「' + $('client').value + '」の質問票に登録します。\n\n1件目: ' + lines[0])) return;
+      json = JSON.stringify({ new_questions: lines.map(q => ({ question: q, reason: '' })) });
+    }
+    status('info', '登録中です');
+    call('processIntake', [{ client: $('client').value, text: '', source: $('kImportSrc').value.trim() || '監査', resultJson: json }], r => {
+      intakeDone(r);
+      $('kImport').value = '';
+    });
+  }
+
+  // 回答JSONの先方用部分が日本語かどうか(ひらがな・カタカナの割合で判定。Code.gs の ensureClientDocLang_ と同じ基準)。判定できなければ null
+  function clientDocIsJapanese(raw) {
+    try {
+      const cd = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)).client_doc || {};
+      const text = [cd.summary || ''].concat(cd.decisions || []).concat((cd.client_actions || []).map(x => x.task || ''))
+        .concat((cd.firm_actions || []).map(x => x.task || '')).join('');
+      if (text.length < 20) return null;
+      const kana = (text.match(/[ぁ-ゖァ-ヺ]/g) || []).length / text.length;
+      return kana > 0.15 ? true : kana < 0.02 ? false : null;
+    } catch (e) { return null; }
+  }
+
+  function hideQMsg() { $('qMsg').value = ''; $('qMsg').style.display = 'none'; $('btnQCopy').style.display = 'none'; }
+
+  function updateCount() { $('count').textContent = $('transcript').value.length.toLocaleString() + ' 文字'; }
+
+  document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+    document.querySelectorAll('.tab, .pane').forEach(x => x.classList.remove('on'));
+    t.classList.add('on'); $('p-' + t.dataset.p).classList.add('on');
+    if (t.dataset.p === 'q') loadQuestions();
+    if (t.dataset.p === 'send') loadSend();
+    if (t.dataset.p === 'k') loadIntakeTemplate();
+  });
+  $('client').onchange = onClientChange;
+  $('showAll').onchange = () => renderQuestions(questions);
+  $('btnNew').onclick = () => { const n = $('newclient'); n.style.display = n.style.display === 'block' ? 'none' : 'block'; };
+  $('btnAddClient').onclick = () => {
+    const name = $('ncName').value.trim();
+    status('info', '関与先ノートを作成中です');
+    call('addClient', [name, $('ncHon').value, $('ncCode').value.trim(), $('ncKind').value], d => {
+      applyInit(d, name); $('newclient').style.display = 'none'; $('ncName').value = ''; $('ncCode').value = '';
+      status('ok', '登録しました: ' + name);
+    });
+  };
+  $('btnRun').onclick = run;
+  $('btnBrief').onclick = sendBrief;
+  $('btnAddK').onclick = addKarte;
+  $('btnTPrompt').onclick = copyTaxPrompt;
+  $('btnTApply').onclick = applyTaxJson;
+  $('btnTPreset').onclick = () => { taxRows = (TAX_PRESET[$('tKind').value] || []).map(x => ({ tax: x, payee: '', amount: '', due: '', annual: '' })); renderTax(); };
+  $('btnTAdd').onclick = () => { taxRows.push({ tax: '', payee: '', amount: '', due: '', annual: '' }); renderTax(); };
+  $('btnTRun').onclick = runTax;
+  $('btnKPrompt').onclick = copyIntakePrompt;
+  $('btnKRun').onclick = runIntake;
+  $('btnKImport').onclick = runImport;
+  $('btnKSpec').onclick = copyImportSpec;
+  $('btnKRules').onclick = copyClientRules;
+  $('btnSend').onclick = send;
+  $('btnSendInt').onclick = sendInternal;
+  $('sMtg').onchange = () => { clearAttach(); fillMessage(); };
+  $('sFile').onchange = uploadAttach;
+  $('sAttach').oninput = updatePdfLink;
+  $('sMethod').onchange = () => { $('sDestLabel').textContent = DEST_HINT[$('sMethod').value] || '送付先'; };
+  $('btnSaveSend').onclick = () => call('saveSendSettings', [$('client').value, $('sMethod').value, $('sDest').value, $('sFolder').value], d => {
+    renderSend(d); status('ok', '送付設定を保存しました');
+  });
+  $('btnPrompt').onclick = copyPrompt;
+  $('transcript').oninput = updateCount;
+  document.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && $('p-mtg').classList.contains('on') && !$('btnRun').disabled) {
+      if ($('result').value.trim()) run(); else copyPrompt();
+    }
+  });
+  $('btnAddQ').onclick = () => call('addQuestion', [$('client').value, $('qText').value, $('qReason').value, $('qTo').value], l => {
+    $('qText').value = ''; $('qReason').value = ''; renderQuestions(l); loadTemplate();
+  });
+  $('btnQMsg').onclick = () => {
+    if (!$('client').value) return fail('関与先を選択または登録してください');
+    const name = $('client').value;
+    status('info', '文面を作成中です');
+    call('getQuestionsMessage', [name, $('qLang').value], r => {
+      if ($('client').value !== name) return;
+      $('qMsg').value = r.text; $('qMsg').style.display = 'block'; $('btnQCopy').style.display = '';
+      status(r.untranslated ? 'err' : 'ok', '「' + name + '」の未回答の質問 ' + r.count + '件を ' + r.lang + ' の文面にまとめました。内容を確認し、「文面をコピー」でメールやチャットに貼り付けてください。' +
+        (r.untranslated ? '\n※' + r.untranslated + '件は訳せなかったため日本語のまま載せています' : '') +
+        (r.lang !== DEFAULT_LANG ? '\n※質問はGoogle翻訳で訳しています。税務用語の訳を確認してください' : ''));
+    });
+  };
+  $('btnQCopy').onclick = () => {
+    const b = $('btnQCopy');
+    b.textContent = copyText($('qMsg').value) ? 'コピーしました' : 'コピーできませんでした。もう一度押してください';
+    setTimeout(() => { b.textContent = '文面をコピー'; }, 2500);
+  };
+  $('btnQPdf').onclick = () => {
+    status('info', '質問票PDFを作成中です');
+    call('exportQuestionsPdf', [$('client').value], r =>
+      status('ok', '質問票を作成しました\n', [{ label: 'PDF', url: r.pdfUrl }, { label: '編集用Doc', url: r.docUrl }]));
+  };
+  $('btnSave').onclick = () => call('saveSettings', [{
+    apiKey: $('apiKey').value, model: $('model').value, firmName: $('firmName').value, templateUrl: $('tplUrl').value, cwToken: $('cwToken').value,
+    lwClientId: $('lwClientId').value, lwClientSecret: $('lwClientSecret').value, lwServiceAccount: $('lwServiceAccount').value,
+    lwBotId: $('lwBotId').value, lwKey: $('lwKey').value, internalHook: $('internalHook').value,
+    mailTemplates: {
+      ja: { subject: $('tplJaSubject').value, body: $('tplJaBody').value },
+      en: { subject: $('tplEnSubject').value, body: $('tplEnBody').value },
+    },
+  }], d => {
+    ['apiKey', 'tplUrl', 'cwToken', 'lwClientId', 'lwClientSecret', 'lwServiceAccount', 'lwBotId', 'lwKey', 'internalHook'].forEach(k => $(k).value = ''); applyInit(d); status('ok', '設定を保存しました');
+  });
+
+  call('getInitData', [], d => {
+    applyInit(d); $('transcript').focus(); updateCount();
+    if (d.version !== PANEL_VERSION) status('err', 'Code.gs と Panel.html の版が違います(Panel: ' + PANEL_VERSION + ' / Code: ' + (d.version || '古い版') +
+      ')。このままだと言語の指定などが正しく効きません。両方を最新版に差し替えて保存し、スプレッドシートを再読み込みしてパネルを開き直してください。');
+  });
+</script>
+</body>
+</html>
